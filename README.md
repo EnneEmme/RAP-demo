@@ -129,11 +129,7 @@ To run with your local GGUF model (`saidutta69/LFM3-VL-2B-heretic`):
 
 1. **Start `llama-server`** in a terminal:
 ```bash
-/opt/homebrew/bin/llama-server \
-  -m ~/.cache/huggingface/hub/models--saidutta69--LFM3-VL-2B-heretic/blobs/d44c819c8146025f254c3c530a4b4365c13ff0f4ed21d82e73ca9fb4c1e84de0 \
-  --port 8080 \
-  --ctx-size 4096 \
-  -ngl 99
+llama-server -hf saidutta69/LFM3-VL-2B-heretic --port 8080 -ngl 99
 ```
 
 2. **Execute RAP with the local server**:

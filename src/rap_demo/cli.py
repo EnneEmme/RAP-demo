@@ -308,8 +308,8 @@ def cmd_run(args: argparse.Namespace) -> int:
     except (ConnectionError, ValueError, LLMError) as exc:
         err_console.print(f"[bold red]Error:[/bold red] {exc}")
         if "llama-server" in str(args.backend).lower() or isinstance(exc, LLMError):
-            err_console.print("\n[yellow]Tip:[/yellow] If using `--backend llama-server`, make sure llama-server is running on http://127.0.0.1:8080:")
-            err_console.print("[dim]/opt/homebrew/bin/llama-server -m <path-to-gguf> --port 8080[/dim]\n")
+            err_console.print("\n[yellow]Tip:[/yellow] Make sure llama-server is running with your Hugging Face model:")
+            err_console.print("[bold green]llama-server -hf saidutta69/LFM3-VL-2B-heretic --port 8080 -ngl 99[/bold green]\n")
         return 1
 
 
@@ -375,8 +375,8 @@ def cmd_ui(args: argparse.Namespace) -> int:
     except (ConnectionError, ValueError, LLMError) as exc:
         err_console.print(f"[bold red]Error:[/bold red] {exc}")
         if "llama-server" in str(args.backend).lower() or isinstance(exc, LLMError):
-            err_console.print("\n[yellow]Tip:[/yellow] If using `--backend llama-server`, make sure llama-server is running on http://127.0.0.1:8080:")
-            err_console.print("[dim]/opt/homebrew/bin/llama-server -m <path-to-gguf> --port 8080[/dim]\n")
+            err_console.print("\n[yellow]Tip:[/yellow] Make sure llama-server is running with your Hugging Face model:")
+            err_console.print("[bold green]llama-server -hf saidutta69/LFM3-VL-2B-heretic --port 8080 -ngl 99[/bold green]\n")
         return 1
 
 
