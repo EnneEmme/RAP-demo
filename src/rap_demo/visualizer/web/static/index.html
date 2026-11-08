@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>RAP Visualizer - Reasoning via Planning</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header>
+    <div class="logo-group">
+      <span class="badge">RAP</span>
+      <h1>Reasoning via Planning Visualizer</h1>
+    </div>
+
+    <div class="controls-bar">
+      <div class="status-indicator">
+        <span id="status-dot" class="status-dot idle"></span>
+        <span id="status-text">IDLE</span>
+        <span id="iteration-counter">Iteration: 0</span>
+      </div>
+
+      <button id="btn-step" class="btn">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 4 15 12 5 20 5 4"></polygon><line x1="19" y1="5" x2="19" y2="19"></line></svg>
+        Step
+      </button>
+
+      <button id="btn-play" class="btn btn-primary">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>
+        Play
+      </button>
+
+      <button id="btn-pause" class="btn" disabled>
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="6" y="4" width="4" height="16"></rect><rect x="14" y="4" width="4" height="16"></rect></svg>
+        Pause
+      </button>
+
+      <button id="btn-reset" class="btn btn-danger">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"></path><path d="M3 3v5h5"></path></svg>
+        Reset
+      </button>
+
+      <div class="slider-container">
+        <label for="speed-slider">Speed</label>
+        <input type="range" id="speed-slider" min="10" max="500" value="100">
+      </div>
+    </div>
+  </header>
+
+  <main>
+    <!-- MCTS Reasoning Tree Panel -->
+    <section class="panel tree-panel">
+      <div class="panel-header">
+        <span>Reasoning Tree Graph</span>
+        <span style="font-size: 0.75rem;">Nodes: N(Visits), Q(Value), Action</span>
+      </div>
+      <div class="tree-container">
+        <svg id="tree-svg" class="tree-svg"></svg>
+      </div>
+    </section>
+
+    <!-- Blocksworld Tabletop Simulator Panel -->
+    <section class="panel tabletop-panel">
+      <div class="panel-header">
+        <span>Tabletop Domain State</span>
+        <span style="font-size: 0.75rem;">Blocksworld Simulator</span>
+      </div>
+      <div class="tabletop-viewport">
+        <div class="gripper-arm">
+          <div class="gripper-stem"></div>
+          <div class="gripper-hand"></div>
+          <div id="held-block-slot" class="held-block-slot"></div>
+        </div>
+
+        <div id="stacks-area" class="stacks-area">
+          <!-- Dynamically generated block stacks -->
+        </div>
+
+        <div class="table-surface"></div>
+      </div>
+    </section>
+
+    <!-- Thought & Inspector Panel -->
+    <section class="panel inspector-panel">
+      <div class="panel-header">
+        <span>Thought & Reasoning Inspector</span>
+        <span style="font-size: 0.75rem;">Selected Node Analysis</span>
+      </div>
+      <div class="inspector-content">
+        <div class="inspector-card">
+          <h4>Node Metadata & Metrics</h4>
+          <pre id="node-inspector" class="json-view">Select a node to inspect its MCTS metrics and action rationale...</pre>
+        </div>
+        <div class="inspector-card">
+          <h4>Domain State Rationale</h4>
+          <pre id="state-inspector" class="json-view">State representation and constraints...</pre>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
