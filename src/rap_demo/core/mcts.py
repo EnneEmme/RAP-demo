@@ -210,15 +210,48 @@ class MCTS:
             )
 
     def get_best_trajectory(self, root: MCTSNode, criterion: str = "reward") -> list[MCTSNode]:
-        """Extracts the best trajectory from root according to 'reward' or 'visits'."""
-        curr = root
-        trajectory = [curr]
+        """Extracts the best trajectory from root according to 'reward' or 'visits'.
 
-        while curr.children:
-            if criterion == "visits":
-                curr = max(curr.children, key=lambda c: (c.N, c.M))
-            else:  # "reward"
-                curr = max(curr.children, key=lambda c: (c.M, c.Q, c.reward))
-            trajectory.append(curr)
+        Following RAP Paper Section 3.3 and Appendix A:
+        - For 'reward': evaluates complete paths to leaves/terminals, selecting the
+          path with maximum cumulative reward (and terminal goal achievement).
+        - For 'visits': selects the path with maximum exploration / visits.
+        """
+        if not root.children:
+            return [root]
 
-        return trajectory
+        all_leaves: list[MCTSNode] = []
+
+        def collect_leaves(node: MCTSNode) -> None:
+            if not node.children:
+                all_leaves.append(node)
+            else:
+                for child in node.children:
+                    collect_leaves(child)
+
+        collect_leaves(root)
+        if not all_leaves:
+            return [root]
+
+        if criterion == "visits":
+            best_leaf = max(
+                all_leaves,
+                key=lambda leaf: (
+                    sum(n.N for n in leaf.path_from_root),
+                    leaf.N,
+                    leaf.reward,
+                ),
+            )
+        else:  # "reward"
+            best_leaf = max(
+                all_leaves,
+                key=lambda leaf: (
+                    1 if leaf.is_terminal and leaf.reward >= 50.0 else 0,
+                    sum(n.reward for n in leaf.path_from_root),
+                    leaf.M if not math.isinf(leaf.M) else -1e9,
+                    leaf.reward,
+                    leaf.N,
+                ),
+            )
+
+        return best_leaf.path_from_root
