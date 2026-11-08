@@ -58,7 +58,11 @@ class SearchController:
 
     @property
     def current_state(self) -> Any:
-        """Current state at root node or domain state."""
+        """Current state at the most promising node of best trajectory."""
+        if self.mcts is not None:
+            best_traj = self.mcts.get_best_trajectory(self._root)
+            if best_traj:
+                return best_traj[-1].state
         return self._root.state
 
     async def step(self) -> dict[str, Any]:
@@ -79,11 +83,16 @@ class SearchController:
         if self._iteration >= self.max_iterations:
             self._status = SearchStatus.FINISHED
 
+        best_traj = self.mcts.get_best_trajectory(self._root) if self.mcts else [self._root]
+        best_node = best_traj[-1] if best_traj else self._root
+
         payload = {
             "type": "step",
             "iteration": self._iteration,
             "status": self._status.value,
             "tree": serialize_tree(self._root),
+            "best_node_id": f"node_{id(best_node)}",
+            "thought": getattr(best_node, "thought", None) or (getattr(best_node.action, "thought", None) if best_node.action else None),
         }
         await self.emit_event("step", payload)
 

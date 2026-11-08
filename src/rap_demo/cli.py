@@ -258,19 +258,18 @@ def cmd_run(args: argparse.Namespace) -> int:
         Integer exit status code (0 for success, non-zero for failure).
     """
     console = Console()
+    err_console = Console(stderr=True)
 
     if args.domain.lower() not in SUPPORTED_DOMAINS:
-        console.print(
+        err_console.print(
             f"[bold red]Error:[/bold red] Unsupported domain '{args.domain}'. "
-            f"Supported domains: {', '.join(sorted(SUPPORTED_DOMAINS))}.",
-            file=sys.stderr,
+            f"Supported domains: {', '.join(sorted(SUPPORTED_DOMAINS))}."
         )
         return 1
 
     if args.iterations <= 0:
-        console.print(
-            f"[bold red]Error:[/bold red] Iterations must be positive, got {args.iterations}.",
-            file=sys.stderr,
+        err_console.print(
+            f"[bold red]Error:[/bold red] Iterations must be positive, got {args.iterations}."
         )
         return 1
 
@@ -307,7 +306,10 @@ def cmd_run(args: argparse.Namespace) -> int:
         visualizer.print_summary(best_path, metrics=metrics)
         return 0
     except (ConnectionError, ValueError, LLMError) as exc:
-        console.print(f"[bold red]Error:[/bold red] {exc}", file=sys.stderr)
+        err_console.print(f"[bold red]Error:[/bold red] {exc}")
+        if "llama-server" in str(args.backend).lower() or isinstance(exc, LLMError):
+            err_console.print("\n[yellow]Tip:[/yellow] If using `--backend llama-server`, make sure llama-server is running on http://127.0.0.1:8080:")
+            err_console.print("[dim]/opt/homebrew/bin/llama-server -m <path-to-gguf> --port 8080[/dim]\n")
         return 1
 
 
@@ -321,26 +323,24 @@ def cmd_ui(args: argparse.Namespace) -> int:
         Integer exit status code (0 for success, non-zero for failure).
     """
     console = Console()
+    err_console = Console(stderr=True)
 
     if args.domain.lower() not in SUPPORTED_DOMAINS:
-        console.print(
+        err_console.print(
             f"[bold red]Error:[/bold red] Unsupported domain '{args.domain}'. "
-            f"Supported domains: {', '.join(sorted(SUPPORTED_DOMAINS))}.",
-            file=sys.stderr,
+            f"Supported domains: {', '.join(sorted(SUPPORTED_DOMAINS))}."
         )
         return 1
 
     if args.port < 1 or args.port > 65535:
-        console.print(
-            f"[bold red]Error:[/bold red] Port must be between 1 and 65535, got {args.port}.",
-            file=sys.stderr,
+        err_console.print(
+            f"[bold red]Error:[/bold red] Port must be between 1 and 65535, got {args.port}."
         )
         return 1
 
     if args.iterations <= 0:
-        console.print(
-            f"[bold red]Error:[/bold red] Iterations must be positive, got {args.iterations}.",
-            file=sys.stderr,
+        err_console.print(
+            f"[bold red]Error:[/bold red] Iterations must be positive, got {args.iterations}."
         )
         return 1
 
@@ -370,10 +370,13 @@ def cmd_ui(args: argparse.Namespace) -> int:
         uvicorn.run(app, host=args.host, port=args.port)
         return 0
     except OSError as exc:
-        console.print(f"[bold red]Server Bind Error:[/bold red] {exc}", file=sys.stderr)
+        err_console.print(f"[bold red]Server Bind Error:[/bold red] {exc}")
         return 1
     except (ConnectionError, ValueError, LLMError) as exc:
-        console.print(f"[bold red]Error:[/bold red] {exc}", file=sys.stderr)
+        err_console.print(f"[bold red]Error:[/bold red] {exc}")
+        if "llama-server" in str(args.backend).lower() or isinstance(exc, LLMError):
+            err_console.print("\n[yellow]Tip:[/yellow] If using `--backend llama-server`, make sure llama-server is running on http://127.0.0.1:8080:")
+            err_console.print("[dim]/opt/homebrew/bin/llama-server -m <path-to-gguf> --port 8080[/dim]\n")
         return 1
 
 
@@ -387,19 +390,18 @@ def cmd_compare(args: argparse.Namespace) -> int:
         Integer exit status code (0 for success, non-zero for failure).
     """
     console = Console()
+    err_console = Console(stderr=True)
 
     if args.domain.lower() not in SUPPORTED_DOMAINS:
-        console.print(
+        err_console.print(
             f"[bold red]Error:[/bold red] Unsupported domain '{args.domain}'. "
-            f"Supported domains: {', '.join(sorted(SUPPORTED_DOMAINS))}.",
-            file=sys.stderr,
+            f"Supported domains: {', '.join(sorted(SUPPORTED_DOMAINS))}."
         )
         return 1
 
     if args.iterations <= 0:
-        console.print(
-            f"[bold red]Error:[/bold red] Iterations must be positive, got {args.iterations}.",
-            file=sys.stderr,
+        err_console.print(
+            f"[bold red]Error:[/bold red] Iterations must be positive, got {args.iterations}."
         )
         return 1
 
@@ -471,7 +473,7 @@ def cmd_compare(args: argparse.Namespace) -> int:
         console.print(table)
         return 0
     except (ConnectionError, ValueError, LLMError, RuntimeError) as exc:
-        console.print(f"[bold red]Comparison Error:[/bold red] {exc}", file=sys.stderr)
+        err_console.print(f"[bold red]Comparison Error:[/bold red] {exc}")
         return 1
 
 

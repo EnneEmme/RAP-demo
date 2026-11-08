@@ -25,6 +25,7 @@ class BlockAction:
     action_type: ActionType | str
     block: str
     target: Optional[str] = None
+    thought: Optional[str] = None
 
     def __post_init__(self) -> None:
         """Normalizes action_type to ActionType enum if string is supplied."""
@@ -295,4 +296,5 @@ class HybridActionProposal(BaseModel):
             action_type=atype,
             block=self.block,
             target=self.target,
+            thought=self.thought,
         )

@@ -124,6 +124,7 @@ class MCTS:
                 depth=node.depth + 1,
                 reward=step_reward,
                 is_terminal=is_terminal,
+                thought=getattr(action, "thought", None),
             )
             node.children.append(child)
 

@@ -16,6 +16,7 @@ class MCTSNode:
         depth: int = 0,
         reward: float = 0.0,
         is_terminal: bool = False,
+        thought: Optional[str] = None,
     ) -> None:
         self.state = state
         self.action = action
@@ -25,6 +26,7 @@ class MCTSNode:
         self.children: list[MCTSNode] = []
         self.visited: bool = False
         self.is_terminal: bool = is_terminal
+        self.thought: Optional[str] = thought
 
         # MCTS Statistics
         self.N: int = 0  # Visit count N(s)
@@ -57,6 +59,8 @@ class MCTSNode:
         child_node.depth = self.depth + 1
         if action is not None:
             child_node.action = action
+            if getattr(action, "thought", None) and not child_node.thought:
+                child_node.thought = getattr(action, "thought")
         self.children.append(child_node)
         return child_node
 

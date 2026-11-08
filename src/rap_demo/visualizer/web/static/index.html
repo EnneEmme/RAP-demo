@@ -44,6 +44,14 @@
         <label for="speed-slider">Speed</label>
         <input type="range" id="speed-slider" min="10" max="500" value="100">
       </div>
+
+      <div class="theme-container">
+        <select id="theme-select" class="theme-select" title="Switch Theme">
+          <option value="tuscan-carbon">🎨 Tuscan & Carbon</option>
+          <option value="cyber-dark">🌌 Cyber Dark</option>
+          <option value="soft-linen-light">☀️ Soft Linen Light</option>
+        </select>
+      </div>
     </div>
   </header>
 
@@ -84,16 +92,22 @@
     <section class="panel inspector-panel">
       <div class="panel-header">
         <span>Thought & Reasoning Inspector</span>
-        <span style="font-size: 0.75rem;">Selected Node Analysis</span>
+        <div class="panel-actions">
+          <button id="btn-follow-best" class="btn btn-sm" style="font-size: 0.7rem; padding: 2px 8px;">Auto-Follow Best Path: ON</button>
+        </div>
       </div>
       <div class="inspector-content">
-        <div class="inspector-card">
-          <h4>Node Metadata & Metrics</h4>
-          <pre id="node-inspector" class="json-view">Select a node to inspect its MCTS metrics and action rationale...</pre>
+        <div class="inspector-card thought-card">
+          <h4>🧠 Model Reasoning & Thought</h4>
+          <div id="thought-display" class="thought-box">Select any node or click Step/Play to watch the model think in real time...</div>
         </div>
         <div class="inspector-card">
-          <h4>Domain State Rationale</h4>
-          <pre id="state-inspector" class="json-view">State representation and constraints...</pre>
+          <h4>Node Metadata & Metrics</h4>
+          <pre id="node-inspector" class="json-view">Select a node to inspect its MCTS metrics...</pre>
+        </div>
+        <div class="inspector-card">
+          <h4>Domain Physical State</h4>
+          <pre id="state-inspector" class="json-view">State representation...</pre>
         </div>
       </div>
     </section>

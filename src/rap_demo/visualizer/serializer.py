@@ -77,6 +77,7 @@ def serialize_tree(root_node: MCTSNode) -> dict[str, Any]:
             "id": f"node_{id(node)}",
             "state": _serialize_state(node.state),
             "action": _serialize_action(node.action),
+            "thought": getattr(node, "thought", None) or (getattr(node.action, "thought", None) if node.action else None),
             "visits": node.N,
             "Q": _sanitize_float(node.Q, default_inf=0.0) or 0.0,
             "M": _sanitize_float(node.M, default_inf=None),
