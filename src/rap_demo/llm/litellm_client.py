@@ -348,12 +348,13 @@ class LiteLLMClient(BaseLLM):
         if total_tokens is not None:
             self.rate_limiter.record_actual_tokens(estimated_tokens, int(total_tokens))
 
-    def _invoke_completion(self, kwargs: dict[str, Any]) -> Any:
-        """Invoke completion with rate-limiting, retry on RateLimitError, and usage metering."""
+    def _invoke_completion(self, kwargs: dict[str, Any], *, allow_retries: bool = True) -> Any:
+        """Invoke completion with rate-limiting, retry on transient errors, and usage metering."""
         fn = self._completion_fn if self._completion_fn is not None else _load_litellm().completion
         estimated_tokens = self._estimate_request_tokens(kwargs)
+        max_attempts = (self.max_retries + 1) if allow_retries else 1
 
-        for attempt in range(self.max_retries + 1):
+        for attempt in range(max_attempts):
             if self.rate_limiter is not None:
                 waited = self.rate_limiter.acquire(estimated_tokens)
                 if waited > 0.1:
@@ -366,7 +367,9 @@ class LiteLLMClient(BaseLLM):
             try:
                 response = fn(**kwargs)
             except Exception as exc:
-                if _is_retryable_error(exc) and attempt < self.max_retries:
+                if self.rate_limiter is not None:
+                    self.rate_limiter.record_actual_tokens(estimated_tokens, 0)
+                if allow_retries and _is_retryable_error(exc) and attempt < self.max_retries:
                     delay = 0.5 * (2**attempt)
                     print(
                         f"[LiteLLM] Transient error on {self.model} (attempt {attempt + 1}/{self.max_retries}), retrying in {delay:.1f}s: {exc}",
@@ -426,6 +429,7 @@ class LiteLLMClient(BaseLLM):
         max_tokens: int,
         temperature: float,
         stop: list[str] | None,
+        allow_retries: bool = True,
     ) -> str:
         """Execute non-streaming completion request and extract text content."""
         kwargs = self._build_completion_kwargs(
@@ -435,7 +439,7 @@ class LiteLLMClient(BaseLLM):
             stop=stop,
         )
         try:
-            response = self._invoke_completion(kwargs)
+            response = self._invoke_completion(kwargs, allow_retries=allow_retries)
         except Exception as exc:
             raise _map_exception(exc) from exc
 
@@ -502,6 +506,8 @@ class LiteLLMClient(BaseLLM):
                         if callback is not None:
                             callback(kind, text)
             except Exception as exc:
+                if self.rate_limiter is not None:
+                    self.rate_limiter.record_actual_tokens(estimated_tokens, 0)
                 if _is_retryable_error(exc) and not content_parts and not reasoning_parts:
                     if attempt < self.max_retries:
                         delay = 0.5 * (2**attempt)
@@ -522,6 +528,7 @@ class LiteLLMClient(BaseLLM):
                         max_tokens=max_tokens,
                         temperature=temperature,
                         stop=stop,
+                        allow_retries=False,
                     )
                     if fallback_text and callback is not None:
                         callback("content", fallback_text)

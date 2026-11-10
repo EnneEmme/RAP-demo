@@ -557,13 +557,15 @@ class VisualizerApp {
         this.renderTree();
         this.renderTrajectoryBar();
       }
-      if (payload.preview_state) {
+      if (payload.preview_state && this.autoFollow) {
         this.stateData = payload.preview_state;
         this.renderTabletop();
         this.renderStateOverview(payload.preview_state, payload.preview_state);
       }
 
-      this.renderLiveStream();
+      if (this.autoFollow) {
+        this.renderLiveStream();
+      }
       return;
     }
 
@@ -583,7 +585,9 @@ class VisualizerApp {
       } else {
         this.liveStream.content += payload.text || "";
       }
-      this.renderLiveStream();
+      if (this.autoFollow) {
+        this.renderLiveStream();
+      }
       return;
     }
 
@@ -959,6 +963,8 @@ class VisualizerApp {
 
     if (isUserClick) {
       this.setAutoFollow(false);
+      this.liveStream.active = false;
+      this.liveElements = null;
     }
 
     this.selectedNode = node;

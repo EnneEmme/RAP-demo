@@ -574,6 +574,35 @@ class TestLiteLLMClientRateLimitingAndRetries:
         assert attempts == 2
         assert len(fc.sleeps) == 1
 
+    def test_failed_requests_release_estimated_tpm_budget(self) -> None:
+        """Failed completion attempts release reserved estimated tokens so they don't stall TPM."""
+        litellm = _import_litellm()
+        fc = FakeClock()
+        limiter = TokenRateLimiter(
+            tokens_per_minute=1000,
+            clock=fc.clock,
+            sleeper=fc.sleeper,
+        )
+
+        def fail_then_succeed(**_: Any) -> SimpleNamespace:
+            if len(fc.sleeps) < 2:
+                raise litellm.InternalServerError(
+                    message="500", llm_provider="gemini", model="gemini/gemma-4-26b-a4b-it"
+                )
+            return _make_obj_response("ok", total_tokens=50)
+
+        client = LiteLLMClient(
+            model="gemini/gemma-4-26b-a4b-it",
+            max_retries=2,
+            rate_limiter=limiter,
+            sleeper=fc.sleeper,
+            completion_fn=fail_then_succeed,
+        )
+        assert client.generate("prompt", max_tokens=600) == "ok"
+        # Retry sleeps were only retry backoff (0.5, 1.0), NOT 60s phantom TPM window waits
+        assert fc.sleeps == [0.5, 1.0]
+
+
 
 
 # ============================================================================
