@@ -2,11 +2,39 @@
 
 from __future__ import annotations
 
+import json
 import math
 import subprocess
+from collections.abc import Callable
 from typing import Any
 import httpx
 from rap_demo.llm.base import BaseLLM, LLMConnectionError, LLMError, LLMTimeoutError
+
+
+def _raise_for_http_error(url: str, response: httpx.Response) -> None:
+    """Raise LLMError with parsed server error details for 4xx/5xx responses."""
+    error_detail = ""
+    try:
+        err_json = response.json()
+        if isinstance(err_json, dict):
+            err_obj = err_json.get("error")
+            if isinstance(err_obj, dict):
+                error_detail = str(err_obj.get("message", ""))
+            elif isinstance(err_obj, str):
+                error_detail = err_obj
+    except Exception:
+        error_detail = response.text
+    detail_str = f": {error_detail}" if error_detail else ""
+    raise LLMError(f"HTTP {response.status_code} error from {url}{detail_str}")
+
+
+def _map_httpx_error(url: str, exc: httpx.HTTPError) -> LLMError:
+    """Translate httpx exceptions into the LLMError hierarchy."""
+    if isinstance(exc, httpx.TimeoutException):
+        return LLMTimeoutError(f"Request to {url} timed out: {exc}")
+    if isinstance(exc, (httpx.ConnectError, httpx.NetworkError)):
+        return LLMConnectionError(f"Failed to connect to {url}: {exc}")
+    return LLMError(f"HTTP error communicating with {url}: {exc}")
 
 
 class LlamaServerClient(BaseLLM):
@@ -20,6 +48,7 @@ class LlamaServerClient(BaseLLM):
         api_key: str | None = None,
         client: httpx.Client | None = None,
         server_command: list[str] | None = None,
+        on_token: Callable[[str, str], None] | None = None,
     ) -> None:
         """Initialize llama-server client.
 
@@ -37,6 +66,7 @@ class LlamaServerClient(BaseLLM):
         self.api_key = api_key
         self._server_command = server_command
         self._server_process: subprocess.Popen[bytes] | None = None
+        self.on_token: Callable[[str, str], None] | None = on_token
 
         self._headers: dict[str, str] = {
             "Content-Type": "application/json",
@@ -72,27 +102,11 @@ class LlamaServerClient(BaseLLM):
                 headers=self._headers,
                 timeout=self.timeout,
             )
-        except httpx.TimeoutException as exc:
-            raise LLMTimeoutError(f"Request to {url} timed out: {exc}") from exc
-        except (httpx.ConnectError, httpx.NetworkError) as exc:
-            raise LLMConnectionError(f"Failed to connect to {url}: {exc}") from exc
         except httpx.HTTPError as exc:
-            raise LLMError(f"HTTP error communicating with {url}: {exc}") from exc
+            raise _map_httpx_error(url, exc) from exc
 
         if response.status_code >= 400:
-            error_detail = ""
-            try:
-                err_json = response.json()
-                if isinstance(err_json, dict):
-                    err_obj = err_json.get("error")
-                    if isinstance(err_obj, dict):
-                        error_detail = str(err_obj.get("message", ""))
-                    elif isinstance(err_obj, str):
-                        error_detail = err_obj
-            except Exception:
-                error_detail = response.text
-            detail_str = f": {error_detail}" if error_detail else ""
-            raise LLMError(f"HTTP {response.status_code} error from {url}{detail_str}")
+            _raise_for_http_error(url, response)
 
         try:
             data = response.json()
@@ -148,6 +162,9 @@ class LlamaServerClient(BaseLLM):
         if stop is not None:
             payload["stop"] = stop
 
+        if self.on_token is not None:
+            return self._generate_streaming(payload)
+
         data = self._post("/v1/completions", payload)
         choices = data.get("choices")
         if not choices or not isinstance(choices, list) or len(choices) == 0:
@@ -158,6 +175,66 @@ class LlamaServerClient(BaseLLM):
             raise LLMError("Malformed LLM response: choice missing 'text' field")
 
         return str(choice["text"])
+
+    def _generate_streaming(self, payload: dict[str, Any]) -> str:
+        """Stream SSE completion chunks from /v1/completions and invoke self.on_token."""
+        url = f"{self.base_url}/v1/completions"
+        stream_payload = {**payload, "stream": True}
+        content_parts: list[str] = []
+        reasoning_parts: list[str] = []
+        callback = self.on_token
+
+        try:
+            with self._client.stream(
+                "POST",
+                url,
+                json=stream_payload,
+                headers=self._headers,
+                timeout=self.timeout,
+            ) as response:
+                if response.status_code >= 400:
+                    response.read()
+                    _raise_for_http_error(url, response)
+
+                for raw_line in response.iter_lines():
+                    line = raw_line.strip()
+                    if not line or not line.startswith("data:"):
+                        continue
+                    data_str = line[5:].strip()
+                    if data_str == "[DONE]":
+                        break
+                    chunk = json.loads(data_str)
+                    choices = chunk.get("choices") if isinstance(chunk, dict) else None
+                    if not choices or not isinstance(choices, list):
+                        continue
+                    choice = choices[0]
+                    if not isinstance(choice, dict):
+                        continue
+
+                    delta = choice.get("delta") if isinstance(choice.get("delta"), dict) else {}
+                    reasoning = choice.get("reasoning_content") or delta.get("reasoning_content")
+                    if isinstance(reasoning, str) and reasoning:
+                        reasoning_parts.append(reasoning)
+                        if callback is not None:
+                            callback("reasoning", reasoning)
+
+                    text = choice.get("text")
+                    if text is None:
+                        text = delta.get("content")
+                    if isinstance(text, str) and text:
+                        content_parts.append(text)
+                        if callback is not None:
+                            callback("content", text)
+        except LLMError:
+            raise
+        except httpx.HTTPError as exc:
+            raise _map_httpx_error(url, exc) from exc
+        except Exception as exc:
+            raise LLMError(f"Failed to parse streaming response from {url}: {exc}") from exc
+
+        if content_parts:
+            return "".join(content_parts)
+        return "".join(reasoning_parts)
 
     def get_logprobs(self, prompt: str, target: str) -> float:
         """Calculate total log-probability of target string given prompt.

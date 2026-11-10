@@ -19,6 +19,7 @@ from rich.console import Console
 from rich.table import Table
 
 from rap_demo.config import ModelsConfig, load_models_config
+from rap_demo.core.events import EventBus
 from rap_demo.core.mcts import MCTS, extract_best_trajectory
 from rap_demo.core.node import MCTSNode
 from rap_demo.domains.blocksworld.domain import BlocksworldDomain
@@ -535,6 +536,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             world_model=domain.create_world_model(),
             reasoning_agent=domain.create_agent(),
             max_depth=6,
+            event_bus=EventBus(),
         )
 
         root = mcts.search(domain.get_initial_state(), num_iterations=args.iterations)
@@ -625,6 +627,7 @@ def cmd_ui(args: argparse.Namespace) -> int:
             world_model=domain.create_world_model(),
             reasoning_agent=domain.create_agent(),
             max_depth=6,
+            event_bus=EventBus(),
         )
         def _save_ui_run(ctrl: SearchController) -> None:
             best_traj = extract_best_trajectory(ctrl.root)
@@ -659,6 +662,7 @@ def cmd_ui(args: argparse.Namespace) -> int:
             goal=DEFAULT_GOAL,
             mode=args.mode,
             on_finish=on_finish,
+            llm=llm,
         )
 
         create_app_fn = sys.modules["rap_demo.visualizer.web.app"].create_app

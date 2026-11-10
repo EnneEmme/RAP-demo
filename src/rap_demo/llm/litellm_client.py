@@ -6,7 +6,7 @@ import math
 import os
 import sys
 import time
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -102,8 +102,11 @@ def _extract_message_content(choice: Any) -> str | None:
     return None
 
 
-def _is_unsupported_param_error(exc: Exception) -> bool:
-    """Return True when exc indicates the provider does not support logprob parameters."""
+def _is_unsupported_param_error(
+    exc: Exception,
+    markers: tuple[str, ...] = ("unsupported", "logprobs", "top_logprobs", "not supported"),
+) -> bool:
+    """Return True when exc indicates the provider rejected an optional parameter."""
     litellm = sys.modules.get("litellm")
     if litellm is None:
         return False
@@ -113,11 +116,37 @@ def _is_unsupported_param_error(exc: Exception) -> bool:
     bad_request_cls = getattr(litellm, "BadRequestError", None)
     if bad_request_cls is not None and isinstance(exc, bad_request_cls):
         msg = str(exc).lower()
-        return any(
-            marker in msg
-            for marker in ("unsupported", "logprobs", "top_logprobs", "not supported")
-        )
+        return any(marker in msg for marker in markers)
     return False
+
+
+def _extract_delta_segments(delta: Any) -> list[tuple[str, str]]:
+    """Extract (kind, text) segments from an object-style or dict-style stream delta."""
+    segments: list[tuple[str, str]] = []
+
+    reasoning = _get_field(delta, "reasoning_content")
+    if isinstance(reasoning, str) and reasoning:
+        segments.append(("reasoning", reasoning))
+
+    thinking_blocks = _get_field(delta, "thinking_blocks")
+    if isinstance(thinking_blocks, Sequence) and not isinstance(thinking_blocks, (str, bytes)):
+        for block in thinking_blocks:
+            text = _get_field(block, "thinking") or _get_field(block, "text")
+            if isinstance(text, str) and text:
+                segments.append(("reasoning", text))
+
+    content = _get_field(delta, "content")
+    if isinstance(content, str) and content:
+        segments.append(("content", content))
+
+    return segments
+
+
+def _is_chunk_stream(response: Any) -> bool:
+    """Return True if response is an iterable stream of chunks rather than a single response."""
+    if isinstance(response, (Mapping, str, bytes)):
+        return False
+    return isinstance(response, (Iterator, list, tuple)) or hasattr(response, "__next__")
 
 
 def _is_retryable_error(exc: Exception) -> bool:
@@ -215,6 +244,7 @@ class LiteLLMClient(BaseLLM):
         rate_limiter: TokenRateLimiter | None = None,
         sleeper: Callable[[float], None] | None = None,
         config_path: str | Path | None = None,
+        on_token: Callable[[str, str], None] | None = None,
     ) -> None:
         """Initialize LiteLLM client.
 
@@ -256,6 +286,7 @@ class LiteLLMClient(BaseLLM):
         self._sleeper: Callable[[float], None] = sleeper if sleeper is not None else time.sleep
         self._completion_fn: Callable[..., Any] | None = completion_fn
         self._call_count: int = 0
+        self.on_token: Callable[[str, str], None] | None = on_token
 
         if rate_limiter is not None:
             self.rate_limiter: TokenRateLimiter | None = rate_limiter
@@ -351,6 +382,89 @@ class LiteLLMClient(BaseLLM):
 
         raise LLMError("LiteLLM completion failed after exhausting retries")
 
+    def _generate_streaming(
+        self,
+        prompt: str,
+        *,
+        max_tokens: int,
+        temperature: float,
+        stop: list[str] | None,
+    ) -> str:
+        """Stream completion chunks, emit on_token callbacks, and return assembled text."""
+        kwargs = self._build_completion_kwargs(
+            prompt,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            stop=stop,
+            stream=True,
+            stream_options={"include_usage": True},
+        )
+        try:
+            raw_stream = self._invoke_completion(kwargs)
+        except Exception as exc:
+            if not _is_unsupported_param_error(
+                exc,
+                markers=("unsupported", "not supported", "stream_options", "unknown parameter"),
+            ):
+                raise _map_exception(exc) from exc
+            kwargs_no_opts = self._build_completion_kwargs(
+                prompt,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                stop=stop,
+                stream=True,
+            )
+            try:
+                raw_stream = self._invoke_completion(kwargs_no_opts)
+            except Exception as retry_exc:
+                raise _map_exception(retry_exc) from retry_exc
+
+        callback = self.on_token
+        if not _is_chunk_stream(raw_stream):
+            choice = _extract_first_choice(raw_stream)
+            if choice is None:
+                raise LLMError("Malformed LLM response: missing or empty choices")
+            content = _extract_message_content(choice)
+            if content is None:
+                raise LLMError("Malformed LLM response: missing message content")
+            if content and callback is not None:
+                callback("content", content)
+            return content
+
+        estimated_tokens = self._estimate_request_tokens(kwargs)
+        content_parts: list[str] = []
+        reasoning_parts: list[str] = []
+        saw_content_field = False
+
+        try:
+            for chunk in raw_stream:
+                self._record_usage(estimated_tokens, chunk)
+                choice = _extract_first_choice(chunk)
+                if choice is None:
+                    continue
+                delta = _get_field(choice, "delta")
+                if delta is None:
+                    continue
+                if _get_field(delta, "content") is not None:
+                    saw_content_field = True
+                for kind, text in _extract_delta_segments(delta):
+                    if kind == "reasoning":
+                        reasoning_parts.append(text)
+                    else:
+                        content_parts.append(text)
+                    if callback is not None:
+                        callback(kind, text)
+        except Exception as exc:
+            raise _map_exception(exc) from exc
+
+        if content_parts:
+            return "".join(content_parts)
+        if reasoning_parts:
+            return "".join(reasoning_parts)
+        if saw_content_field:
+            return ""
+        raise LLMError("Malformed LLM streaming response: empty stream with no content")
+
     def generate(
         self,
         prompt: str,
@@ -374,6 +488,14 @@ class LiteLLMClient(BaseLLM):
             LLMConnectionError: If the provider cannot be reached.
             LLMError: If the API returns an error or malformed response.
         """
+        if self.on_token is not None:
+            return self._generate_streaming(
+                prompt,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                stop=stop,
+            )
+
         kwargs = self._build_completion_kwargs(
             prompt,
             max_tokens=max_tokens,

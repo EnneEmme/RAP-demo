@@ -10,9 +10,18 @@ from collections.abc import Callable
 from enum import Enum
 from typing import Any, Optional
 
+from rap_demo.core.events import Event, EventBus, EventType
 from rap_demo.core.mcts import MCTS, extract_best_trajectory
 from rap_demo.core.node import MCTSNode
 from rap_demo.visualizer.serializer import serialize_tree
+
+
+_PHASE_EVENT_MAP: dict[EventType, str] = {
+    EventType.ON_SELECT: "select",
+    EventType.ON_EXPAND: "expand",
+    EventType.ON_SIMULATE: "simulate",
+    EventType.ON_BACKPROP: "backprop",
+}
 
 
 class SearchStatus(str, Enum):
@@ -39,8 +48,13 @@ class SearchController:
         initial_iteration: int = 0,
         initial_status: Optional[SearchStatus] = None,
         on_finish: Optional[Callable[[SearchController], Any]] = None,
+        llm: Optional[Any] = None,
     ) -> None:
         self.mcts: Optional[MCTS] = mcts
+        if llm is None and mcts is not None:
+            agent = getattr(mcts, "reasoning_agent", None)
+            llm = getattr(agent, "llm", None) if agent is not None else None
+        self.llm: Optional[Any] = llm
         self.initial_state: Any = initial_state if initial_state is not None else "initial"
         self.max_iterations: int = max_iterations
         self.step_delay: float = step_delay
@@ -58,6 +72,45 @@ class SearchController:
         self._finish_notified: bool = self._status == SearchStatus.FINISHED
         self._subscribers: set[asyncio.Queue[dict[str, Any]]] = set()
         self._running_task: Optional[asyncio.Task[None]] = None
+        self._active_loop: Optional[asyncio.AbstractEventLoop] = None
+        self._active_iteration: int = 0
+
+        if self.mcts is not None:
+            if getattr(self.mcts, "event_bus", None) is None:
+                self.mcts.event_bus = EventBus()
+            self._attach_event_bus(self.mcts.event_bus)
+
+    def _enqueue_nowait(self, payload: dict[str, Any]) -> None:
+        """Enqueue an event payload onto all subscriber queues on the event loop thread."""
+        for queue in list(self._subscribers):
+            queue.put_nowait(payload)
+
+    def _dispatch_event_threadsafe(self, payload: dict[str, Any]) -> None:
+        """Broadcast an SSE payload safely from either the event loop or a worker thread."""
+        loop = self._active_loop
+        if loop is not None and not loop.is_closed():
+            loop.call_soon_threadsafe(self._enqueue_nowait, payload)
+        else:
+            self._enqueue_nowait(payload)
+
+    def _on_mcts_phase_event(self, event: Event) -> None:
+        """Forward MCTS lifecycle events as real-time SSE 'phase' events."""
+        phase = _PHASE_EVENT_MAP.get(event.type)
+        if phase is None:
+            return
+        iteration = self._active_iteration or (self._iteration + 1)
+        self._dispatch_event_threadsafe(
+            {
+                "type": "phase",
+                "phase": phase,
+                "iteration": iteration,
+            }
+        )
+
+    def _attach_event_bus(self, event_bus: EventBus) -> None:
+        """Subscribe to MCTS lifecycle phase events on the given EventBus."""
+        for ev_type in _PHASE_EVENT_MAP:
+            event_bus.subscribe(ev_type, self._on_mcts_phase_event)
 
     def set_step_delay(self, delay_seconds: float) -> float:
         """Updates step delay (clamped to [0.01s, 2.0s]) for live playback control."""
@@ -127,7 +180,35 @@ class SearchController:
                 file=sys.stderr,
                 flush=True,
             )
-            await asyncio.to_thread(self.mcts.step_iteration, self._root)
+            self._active_loop = asyncio.get_running_loop()
+            self._active_iteration = next_iter
+            has_on_token = self.llm is not None and hasattr(self.llm, "on_token")
+            prev_on_token = getattr(self.llm, "on_token", None) if has_on_token else None
+            if has_on_token:
+                def _stream_token(kind: str, text: str) -> None:
+                    self._dispatch_event_threadsafe(
+                        {
+                            "type": "token",
+                            "kind": kind,
+                            "text": text,
+                            "call_id": getattr(self.llm, "call_count", 0),
+                            "iteration": next_iter,
+                        }
+                    )
+
+                self.llm.on_token = _stream_token
+
+            try:
+                await asyncio.to_thread(self.mcts.step_iteration, self._root)
+                # Yield once so any call_soon_threadsafe phase/token callbacks queued by
+                # the worker thread flush onto subscriber queues before emitting 'step'.
+                await asyncio.sleep(0)
+            finally:
+                if has_on_token:
+                    self.llm.on_token = prev_on_token
+                self._active_loop = None
+                self._active_iteration = 0
+
             elapsed = time.perf_counter() - t0
             print(
                 f"[RAP] Completed MCTS iteration {next_iter}/{self.max_iterations} in {elapsed:.2f}s",

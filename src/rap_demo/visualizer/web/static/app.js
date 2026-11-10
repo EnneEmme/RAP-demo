@@ -21,6 +21,14 @@ class VisualizerApp {
     this.stepTicker = null;
     this.syncTimer = null;
     this.eventSource = null;
+    this.liveStream = {
+      active: false,
+      iteration: 0,
+      phase: "",
+      callId: null,
+      reasoning: "",
+      content: "",
+    };
 
     // Pan & Zoom state
     this.panX = 0;
@@ -516,10 +524,46 @@ class VisualizerApp {
     }
 
     if (payload.type === "error" && payload.message) {
+      this.liveStream.active = false;
       this.showToast(payload.message);
     }
 
+    if (payload.type === "phase") {
+      this.liveStream.active = true;
+      if (payload.iteration !== undefined) this.liveStream.iteration = payload.iteration;
+      this.liveStream.phase = payload.phase || "";
+      this.renderLiveStream();
+      return;
+    }
+
+    if (payload.type === "token") {
+      const incomingCallId = payload.call_id ?? null;
+      if (!this.liveStream.active || (incomingCallId !== null && this.liveStream.callId !== incomingCallId)) {
+        this.liveStream.active = true;
+        this.liveStream.callId = incomingCallId;
+        this.liveStream.reasoning = "";
+        this.liveStream.content = "";
+      }
+      if (payload.iteration !== undefined) this.liveStream.iteration = payload.iteration;
+      if (payload.kind === "reasoning") {
+        this.liveStream.reasoning += payload.text || "";
+      } else {
+        this.liveStream.content += payload.text || "";
+      }
+      this.renderLiveStream();
+      return;
+    }
+
     const isReset = payload.type === "reset";
+    if (isReset || payload.type === "step") {
+      this.liveStream.active = false;
+      if (isReset) {
+        this.liveStream.phase = "";
+        this.liveStream.callId = null;
+        this.liveStream.reasoning = "";
+        this.liveStream.content = "";
+      }
+    }
     if (isReset) {
       this.selectedNode = null;
       this.hasManualViewport = false;
@@ -893,12 +937,48 @@ class VisualizerApp {
     this.updateTabletopForNode(node);
   }
 
+  renderLiveStream() {
+    if (!this.thoughtDisplay || !this.liveStream.active) return;
+
+    const phaseLabel = this.liveStream.phase ? this.liveStream.phase.toUpperCase() : "LLM";
+    const iterLabel = this.liveStream.iteration ? `Iter ${this.liveStream.iteration} · ` : "";
+    const callLabel = this.liveStream.callId ? ` · Call #${this.liveStream.callId}` : "";
+
+    if (this.thoughtModeTag) {
+      this.thoughtModeTag.textContent = `LIVE · ${iterLabel}${phaseLabel}${callLabel}`;
+      this.thoughtModeTag.classList.add("live");
+    }
+
+    const parts = [];
+    if (this.liveStream.reasoning) {
+      parts.push(
+        `<div class="live-section-label">Thinking (Live)</div>` +
+        `<pre class="live-stream-pre live-reasoning">${this.escapeHtml(this.liveStream.reasoning)}</pre>`
+      );
+    }
+    if (this.liveStream.content) {
+      parts.push(
+        `<div class="live-section-label">Output (Live)</div>` +
+        `<pre class="live-stream-pre live-output">${this.escapeHtml(this.liveStream.content)}</pre>`
+      );
+    }
+    if (parts.length === 0) {
+      parts.push(
+        `<p class="empty-hint">MCTS phase <strong>${this.escapeHtml(phaseLabel)}</strong> — waiting for model stream...</p>`
+      );
+    }
+
+    this.thoughtDisplay.innerHTML = parts.join("");
+    this.thoughtDisplay.scrollTop = this.thoughtDisplay.scrollHeight;
+  }
+
   renderInspector(node) {
     if (this.nodeIdBadge) this.nodeIdBadge.textContent = node.id || "—";
     if (this.terminalBadge) this.terminalBadge.hidden = !node.is_terminal;
 
     // 1. Thought & Action Card
     if (this.thoughtModeTag) {
+      this.thoughtModeTag.classList.remove("live");
       if (node.thought) this.thoughtModeTag.textContent = "Hybrid Thought";
       else if (node.action) this.thoughtModeTag.textContent = "Paper Action";
       else this.thoughtModeTag.textContent = "Root";

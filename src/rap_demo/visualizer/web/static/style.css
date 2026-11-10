@@ -475,6 +475,12 @@ body {
   white-space: nowrap;
 }
 
+.subtle-pill.live {
+  background: var(--accent-soft);
+  border-color: var(--accent-border);
+  color: var(--accent);
+}
+
 /* ==========================================================================
    Tree Panel & Interactive SVG Canvas
    ========================================================================== */
@@ -996,6 +1002,36 @@ svg.tree-svg {
   border: 1px solid var(--border-subtle);
   border-radius: 5px;
   padding: 8px 10px;
+}
+
+.live-section-label {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--accent);
+}
+
+.live-stream-pre {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+  background: var(--bg-panel);
+  border: 1px solid var(--border-subtle);
+  border-radius: 5px;
+  padding: 8px 10px;
+  color: var(--text-primary);
+}
+
+.live-stream-pre.live-reasoning {
+  color: var(--text-secondary);
+  border-left: 2px solid var(--accent-border);
+}
+
+.live-stream-pre.live-output {
+  color: var(--text-primary);
 }
 
 .action-line {

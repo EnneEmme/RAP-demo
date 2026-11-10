@@ -616,13 +616,23 @@ class TestSearchController:
 
         await controller.step()
 
-        # Both subscriber queues should have received the event
-        event1 = await asyncio.wait_for(queue1.get(), timeout=1.0)
-        event2 = await asyncio.wait_for(queue2.get(), timeout=1.0)
+        # Both subscriber queues should receive phase events and the final step event
+        events1: list[dict[str, Any]] = []
+        events2: list[dict[str, Any]] = []
+        while True:
+            ev1 = await asyncio.wait_for(queue1.get(), timeout=1.0)
+            events1.append(ev1)
+            if ev1.get("type") in ("step", "iteration_complete", "tree_update"):
+                break
+        while True:
+            ev2 = await asyncio.wait_for(queue2.get(), timeout=1.0)
+            events2.append(ev2)
+            if ev2.get("type") in ("step", "iteration_complete", "tree_update"):
+                break
 
-        assert event1["type"] in ("step", "iteration_complete", "tree_update")
-        assert event1["iteration"] == 1
-        assert event2["iteration"] == 1
+        assert events1[-1]["type"] in ("step", "iteration_complete", "tree_update")
+        assert events1[-1]["iteration"] == 1
+        assert events2[-1]["iteration"] == 1
 
         controller.unsubscribe(queue1)
         controller.unsubscribe(queue2)
@@ -635,6 +645,8 @@ class TestSearchController:
         queue = controller.subscribe()
         await controller.step()
         _ = await queue.get()
+        while not queue.empty():
+            queue.get_nowait()
 
         controller.unsubscribe(queue)
         await controller.step()
