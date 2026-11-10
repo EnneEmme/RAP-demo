@@ -23,6 +23,7 @@ from rap_demo.domains.blocksworld.domain import BlocksworldDomain
 from rap_demo.domains.blocksworld.models import BlockState
 from rap_demo.llm.base import BaseLLM, LLMError
 from rap_demo.llm.factory import get_llm
+from rap_demo.llm.litellm_client import _load_dotenv_file
 from rap_demo.llm.mock import MockLLM
 from rap_demo.visualizer.console import RichMCTSConsole
 import rap_demo.visualizer.web.app
@@ -43,11 +44,17 @@ DEFAULT_GOAL: list[str] = [
 ]
 
 
-def _create_llm(backend: str) -> BaseLLM:
+def _create_llm(
+    backend: str,
+    model: str | None = None,
+    api_base: str | None = None,
+) -> BaseLLM:
     """Instantiates and configures LLM backend for planning.
 
     Args:
-        backend: Backend identifier ('mock' or 'llama-server').
+        backend: Backend identifier ('mock', 'llama-server', or 'litellm').
+        model: Optional model identifier forwarded to non-mock backends.
+        api_base: Optional custom API base URL forwarded when provided.
 
     Returns:
         Configured BaseLLM instance.
@@ -128,7 +135,56 @@ def _create_llm(backend: str) -> BaseLLM:
         )
         return get_llm(backend, default_response=default_resp, response_rules=rules)
 
-    return get_llm(backend)
+    _load_dotenv_file()
+
+    kwargs: dict[str, Any] = {}
+    if model is not None:
+        kwargs["model"] = model
+    if api_base is not None:
+        if backend.strip().lower().replace("-", "_") in ("llama", "llama_server"):
+            kwargs["base_url"] = api_base
+        else:
+            kwargs["api_base"] = api_base
+    return get_llm(backend, **kwargs)
+
+
+def _add_llm_arguments(subparser: argparse.ArgumentParser) -> None:
+    """Register shared LLM backend selection arguments on a CLI subparser."""
+    subparser.add_argument(
+        "--backend",
+        choices=["mock", "llama-server", "litellm"],
+        default="mock",
+        help="LLM backend identifier (choices: mock, llama-server, litellm; default: mock)",
+    )
+    subparser.add_argument(
+        "--model",
+        default=None,
+        help="Model identifier for external/local LLM backends (e.g. gpt-4o-mini, anthropic/claude-3-5-sonnet-20241022)",
+    )
+    subparser.add_argument(
+        "--api-base",
+        default=None,
+        help="Optional custom API base URL for LLM backend requests",
+    )
+
+
+def _print_backend_error_tip(err_console: Console, backend: str) -> None:
+    """Print a backend-specific troubleshooting tip to stderr."""
+    normalized = backend.strip().lower().replace("-", "_")
+    if normalized in ("litellm", "lite_llm"):
+        err_console.print(
+            "\n[yellow]Tip:[/yellow] Make sure the appropriate API key environment variable is set "
+            "(or defined in your [bold].env[/bold] file, e.g., [bold]OPENAI_API_KEY[/bold], "
+            "[bold]ANTHROPIC_API_KEY[/bold], [bold]GEMINI_API_KEY[/bold]) and verify "
+            "[bold]--model[/bold] / [bold]--api-base[/bold].\n"
+        )
+    elif normalized in ("llama", "llama_server"):
+        err_console.print(
+            "\n[yellow]Tip:[/yellow] Make sure llama-server is running with your Hugging Face model:"
+        )
+        err_console.print(
+            "[bold green]llama-server -hf saidutta69/LFM3-VL-2B-heretic --port 8080 -ngl 99[/bold green]\n"
+        )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -161,12 +217,7 @@ def build_parser() -> argparse.ArgumentParser:
         default="hybrid",
         help="Reasoning mode (choices: hybrid, paper; default: hybrid)",
     )
-    run_parser.add_argument(
-        "--backend",
-        choices=["mock", "llama-server"],
-        default="mock",
-        help="LLM backend identifier (choices: mock, llama-server; default: mock)",
-    )
+    _add_llm_arguments(run_parser)
     run_parser.add_argument(
         "--iterations",
         type=int,
@@ -205,12 +256,7 @@ def build_parser() -> argparse.ArgumentParser:
         default="hybrid",
         help="Reasoning mode (choices: hybrid, paper; default: hybrid)",
     )
-    ui_parser.add_argument(
-        "--backend",
-        choices=["mock", "llama-server"],
-        default="mock",
-        help="LLM backend identifier (choices: mock, llama-server; default: mock)",
-    )
+    _add_llm_arguments(ui_parser)
     ui_parser.add_argument(
         "--iterations",
         type=int,
@@ -225,12 +271,7 @@ def build_parser() -> argparse.ArgumentParser:
         default="blocksworld",
         help="Domain identifier (default: blocksworld)",
     )
-    compare_parser.add_argument(
-        "--backend",
-        choices=["mock", "llama-server"],
-        default="mock",
-        help="LLM backend identifier (choices: mock, llama-server; default: mock)",
-    )
+    _add_llm_arguments(compare_parser)
     compare_parser.add_argument(
         "--iterations",
         type=int,
@@ -274,7 +315,11 @@ def cmd_run(args: argparse.Namespace) -> int:
         return 1
 
     try:
-        llm = _create_llm(args.backend)
+        llm = _create_llm(
+            args.backend,
+            model=getattr(args, "model", None),
+            api_base=getattr(args, "api_base", None),
+        )
         domain = BlocksworldDomain(
             initial_state=DEFAULT_INITIAL_STATE,
             goal=DEFAULT_GOAL,
@@ -307,9 +352,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         return 0
     except (ConnectionError, ValueError, LLMError) as exc:
         err_console.print(f"[bold red]Error:[/bold red] {exc}")
-        if "llama-server" in str(args.backend).lower() or isinstance(exc, LLMError):
-            err_console.print("\n[yellow]Tip:[/yellow] Make sure llama-server is running with your Hugging Face model:")
-            err_console.print("[bold green]llama-server -hf saidutta69/LFM3-VL-2B-heretic --port 8080 -ngl 99[/bold green]\n")
+        _print_backend_error_tip(err_console, str(args.backend))
         return 1
 
 
@@ -345,7 +388,11 @@ def cmd_ui(args: argparse.Namespace) -> int:
         return 1
 
     try:
-        llm = _create_llm(args.backend)
+        llm = _create_llm(
+            args.backend,
+            model=getattr(args, "model", None),
+            api_base=getattr(args, "api_base", None),
+        )
         domain = BlocksworldDomain(
             initial_state=DEFAULT_INITIAL_STATE,
             goal=DEFAULT_GOAL,
@@ -361,6 +408,8 @@ def cmd_ui(args: argparse.Namespace) -> int:
             mcts=mcts,
             initial_state=domain.get_initial_state(),
             max_iterations=args.iterations,
+            goal=DEFAULT_GOAL,
+            mode=args.mode,
         )
 
         create_app_fn = sys.modules["rap_demo.visualizer.web.app"].create_app
@@ -374,9 +423,7 @@ def cmd_ui(args: argparse.Namespace) -> int:
         return 1
     except (ConnectionError, ValueError, LLMError) as exc:
         err_console.print(f"[bold red]Error:[/bold red] {exc}")
-        if "llama-server" in str(args.backend).lower() or isinstance(exc, LLMError):
-            err_console.print("\n[yellow]Tip:[/yellow] Make sure llama-server is running with your Hugging Face model:")
-            err_console.print("[bold green]llama-server -hf saidutta69/LFM3-VL-2B-heretic --port 8080 -ngl 99[/bold green]\n")
+        _print_backend_error_tip(err_console, str(args.backend))
         return 1
 
 
@@ -406,8 +453,11 @@ def cmd_compare(args: argparse.Namespace) -> int:
         return 1
 
     try:
+        model = getattr(args, "model", None)
+        api_base = getattr(args, "api_base", None)
+
         # 1. Execute Hybrid Mode
-        llm_hybrid = _create_llm(args.backend)
+        llm_hybrid = _create_llm(args.backend, model=model, api_base=api_base)
         domain_hybrid = BlocksworldDomain(
             initial_state=DEFAULT_INITIAL_STATE,
             goal=DEFAULT_GOAL,
@@ -427,7 +477,7 @@ def cmd_compare(args: argparse.Namespace) -> int:
         calls_hybrid = getattr(llm_hybrid, "call_count", 0)
 
         # 2. Execute Paper Mode
-        llm_paper = _create_llm(args.backend)
+        llm_paper = _create_llm(args.backend, model=model, api_base=api_base)
         domain_paper = BlocksworldDomain(
             initial_state=DEFAULT_INITIAL_STATE,
             goal=DEFAULT_GOAL,
@@ -474,6 +524,8 @@ def cmd_compare(args: argparse.Namespace) -> int:
         return 0
     except (ConnectionError, ValueError, LLMError, RuntimeError) as exc:
         err_console.print(f"[bold red]Comparison Error:[/bold red] {exc}")
+        if isinstance(exc, (ConnectionError, LLMError)):
+            _print_backend_error_tip(err_console, str(args.backend))
         return 1
 
 
@@ -508,6 +560,7 @@ def main(args: Sequence[str] | None = None) -> int:
         return 1
 
     try:
+        _load_dotenv_file()
         if command == "run":
             return cmd_run(parsed_args)
         elif command == "ui":

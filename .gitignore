@@ -50,5 +50,10 @@ htmlcov/
 *.swp
 *.swo
 
+# Environments & Secrets
+.env
+.env.*
+!.env.example
+
 # Project specific
 data/RAP repo paper/.git
