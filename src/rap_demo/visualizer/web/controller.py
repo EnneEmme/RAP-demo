@@ -119,7 +119,7 @@ class SearchController:
             }
 
         if self.mcts is not None:
-            self.mcts.step_iteration(self._root)
+            await asyncio.to_thread(self.mcts.step_iteration, self._root)
 
         self._iteration += 1
 

@@ -16,6 +16,7 @@ class VisualizerApp {
     this.bestPathNodes = [];
     this.autoFollow = true;
     this.inspectorMode = "overview";
+    this.isStepping = false;
     this.eventSource = null;
 
     // Pan & Zoom state
@@ -264,7 +265,7 @@ class VisualizerApp {
     toast.className = "toast";
     toast.textContent = message;
     this.toastContainer.appendChild(toast);
-    setTimeout(() => toast.remove(), 3500);
+    setTimeout(() => toast.remove(), 7000);
   }
 
   async updateStepDelay(ms) {
@@ -282,6 +283,12 @@ class VisualizerApp {
   }
 
   async postAction(endpoint) {
+    const isStep = endpoint.endsWith("/step");
+    if (isStep) {
+      if (this.isStepping) return;
+      this.isStepping = true;
+      this.setStepPending(true);
+    }
     try {
       const res = await fetch(endpoint, { method: "POST" });
       if (!res.ok) {
@@ -314,6 +321,23 @@ class VisualizerApp {
     } catch (err) {
       console.error(`Error calling ${endpoint}:`, err);
       this.showToast(`Action failed (${endpoint.split("/").pop()}): ${err.message}`);
+    } finally {
+      if (isStep) {
+        this.isStepping = false;
+        this.setStepPending(false);
+        this.updateStatus(this.status, this.iteration);
+      }
+    }
+  }
+
+  setStepPending(pending) {
+    if (this.btnStep) {
+      this.btnStep.disabled = pending;
+      const label = this.btnStep.querySelector("span");
+      if (label) label.textContent = pending ? "Running..." : "Step";
+    }
+    if (this.btnPlay && pending) {
+      this.btnPlay.disabled = true;
     }
   }
 
