@@ -46,6 +46,7 @@ def _load_litellm() -> Any:
     _ensure_litellm_compat()
     import litellm
 
+    litellm.suppress_debug_info = True
     return litellm
 
 

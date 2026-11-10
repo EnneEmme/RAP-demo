@@ -205,8 +205,11 @@ def _resolve_execution_llm_config(args: argparse.Namespace) -> dict[str, Any]:
     explicit_args: set[str] = getattr(args, "_explicit_args", set())
 
     cfg: ModelsConfig | None = None
-    if config_path is not None or model is not None:
+    if config_path is not None or model is not None or backend != "mock":
         cfg = load_models_config(config_path)
+
+    if cfg is not None and model is None and backend == "litellm" and cfg.default_model:
+        model = cfg.default_model
 
     if cfg is not None and model is not None:
         profile = cfg.resolve_model(model)

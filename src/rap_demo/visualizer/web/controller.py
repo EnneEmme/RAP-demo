@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import sys
 from collections.abc import Callable
 from enum import Enum
 from typing import Any, Optional
@@ -177,6 +178,7 @@ class SearchController:
         except asyncio.CancelledError:
             pass
         except Exception as exc:
+            print(f"[RAP UI Error] {exc}", file=sys.stderr, flush=True)
             self._status = SearchStatus.PAUSED
             await self.emit_event(
                 "error",

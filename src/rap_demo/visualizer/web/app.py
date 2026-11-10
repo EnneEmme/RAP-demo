@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sys
 from pathlib import Path
 from typing import Any, AsyncGenerator, Optional
 
@@ -97,6 +98,7 @@ def create_app(controller: Optional[SearchController] = None) -> FastAPI:
         try:
             res = await ctrl.step()
         except LLMError as exc:
+            print(f"[RAP UI Error] {exc}", file=sys.stderr, flush=True)
             raise HTTPException(status_code=502, detail=str(exc)) from exc
         return {
             "iteration": ctrl.iteration,
