@@ -13,15 +13,65 @@ from typing import Any, Optional
 from rap_demo.core.events import Event, EventBus, EventType
 from rap_demo.core.mcts import MCTS, extract_best_trajectory
 from rap_demo.core.node import MCTSNode
-from rap_demo.visualizer.serializer import serialize_tree
+from rap_demo.visualizer.serializer import _serialize_state, serialize_tree
 
 
 _PHASE_EVENT_MAP: dict[EventType, str] = {
     EventType.ON_SELECT: "select",
     EventType.ON_EXPAND: "expand",
+    EventType.ON_SIMULATE_STEP: "simulate_step",
     EventType.ON_SIMULATE: "simulate",
     EventType.ON_BACKPROP: "backprop",
 }
+
+
+def _find_serialized_node(node_dict: dict[str, Any], target_id: str) -> dict[str, Any] | None:
+    """Locate a node dictionary inside a serialized tree by its id."""
+    if node_dict.get("id") == target_id:
+        return node_dict
+    for child in node_dict.get("children", []):
+        found = _find_serialized_node(child, target_id)
+        if found is not None:
+            return found
+    return None
+
+
+def _build_tree_with_sim_preview(
+    root: MCTSNode,
+    anchor_node: MCTSNode | None,
+    sim_path: list[MCTSNode],
+) -> dict[str, Any]:
+    """Serialize root and attach temporary rollout preview nodes without mutating MCTSNode tree."""
+    tree_dict = serialize_tree(root)
+    if anchor_node is None or len(sim_path) <= 1:
+        return tree_dict
+
+    target = _find_serialized_node(tree_dict, f"node_{id(anchor_node)}")
+    if target is None:
+        return tree_dict
+
+    parent_dict = target
+    for sim_node in sim_path[1:]:
+        preview_dict: dict[str, Any] = {
+            "id": f"preview_{id(sim_node)}",
+            "state": _serialize_state(sim_node.state),
+            "action": str(sim_node.action) if sim_node.action is not None else None,
+            "thought": getattr(sim_node, "thought", None)
+            or (getattr(sim_node.action, "thought", None) if sim_node.action else None),
+            "visits": sim_node.N,
+            "Q": float(sim_node.Q),
+            "M": None,
+            "reward": float(sim_node.reward),
+            "uct": None,
+            "is_terminal": bool(sim_node.is_terminal),
+            "depth": int(sim_node.depth),
+            "is_preview": True,
+            "children": [],
+        }
+        parent_dict.setdefault("children", []).append(preview_dict)
+        parent_dict = preview_dict
+
+    return tree_dict
 
 
 class SearchStatus(str, Enum):
@@ -99,13 +149,24 @@ class SearchController:
         if phase is None:
             return
         iteration = self._active_iteration or (self._iteration + 1)
-        self._dispatch_event_threadsafe(
-            {
-                "type": "phase",
-                "phase": phase,
-                "iteration": iteration,
-            }
-        )
+        payload: dict[str, Any] = {
+            "type": "phase",
+            "phase": phase,
+            "iteration": iteration,
+        }
+        if event.type in (EventType.ON_EXPAND, EventType.ON_BACKPROP):
+            payload["tree"] = serialize_tree(self._root)
+            payload["best_path_ids"] = self.get_best_path_ids()
+        elif event.type == EventType.ON_SIMULATE_STEP:
+            anchor = event.data.get("node")
+            sim_path = event.data.get("sim_path") or []
+            current_node = event.data.get("current_node")
+            payload["tree"] = _build_tree_with_sim_preview(self._root, anchor, sim_path)
+            payload["best_path_ids"] = self.get_best_path_ids()
+            if current_node is not None:
+                payload["preview_node_id"] = f"preview_{id(current_node)}"
+                payload["preview_state"] = _serialize_state(current_node.state)
+        self._dispatch_event_threadsafe(payload)
 
     def _attach_event_bus(self, event_bus: EventBus) -> None:
         """Subscribe to MCTS lifecycle phase events on the given EventBus."""

@@ -10,6 +10,7 @@ from typing import Any, Callable, Optional
 class EventType(str, Enum):
     ON_SELECT = "on_select"
     ON_EXPAND = "on_expand"
+    ON_SIMULATE_STEP = "on_simulate_step"
     ON_SIMULATE = "on_simulate"
     ON_BACKPROP = "on_backprop"
     ON_ITERATION_COMPLETE = "on_iteration_complete"

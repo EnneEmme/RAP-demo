@@ -563,6 +563,13 @@ svg.tree-svg {
   stroke-width: 2.25px;
 }
 
+.link.preview {
+  stroke: var(--accent);
+  stroke-width: 1.5px;
+  stroke-dasharray: 4 3;
+  opacity: 0.72;
+}
+
 .node circle {
   fill: var(--bg-panel);
   stroke: var(--border-strong);
@@ -582,6 +589,12 @@ svg.tree-svg {
 
 .node.terminal circle {
   stroke-dasharray: 3 2.5;
+}
+
+.node.preview circle {
+  stroke: var(--accent);
+  stroke-dasharray: 4 3;
+  opacity: 0.78;
 }
 
 .node circle:hover {

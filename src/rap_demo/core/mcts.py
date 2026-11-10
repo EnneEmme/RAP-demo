@@ -218,11 +218,22 @@ class MCTS:
                 depth=curr.depth + 1,
                 reward=best_reward,
                 is_terminal=best_is_terminal,
+                thought=getattr(best_action, "thought", None),
             )
             sim_path.append(next_node)
             rollout_reward += discount_power * best_reward
             discount_power *= self.discount
             curr = next_node
+            if self.event_bus:
+                self.event_bus.emit(
+                    EventType.ON_SIMULATE_STEP,
+                    {
+                        "node": node,
+                        "current_node": next_node,
+                        "sim_path": list(sim_path),
+                        "rollout_reward": rollout_reward,
+                    },
+                )
 
         if self.event_bus:
             self.event_bus.emit(

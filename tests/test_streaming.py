@@ -578,3 +578,101 @@ class TestCmdUIStreamingWiring:
         assert ctrl.mcts is not None
         assert isinstance(ctrl.mcts.event_bus, EventBus)
         assert ctrl.llm is not None
+
+
+class TestRealTimeTreeAndPreviewStreaming:
+    """Tests live tree updates on ON_EXPAND and rollout preview streaming on ON_SIMULATE_STEP."""
+
+    def test_mcts_simulate_emits_on_simulate_step_per_rollout_hop(self) -> None:
+        """MCTS.simulate emits ON_SIMULATE_STEP for each simulated rollout transition."""
+        from rap_demo.core.mcts import MCTS
+        from rap_demo.domains.blocksworld.domain import BlocksworldDomain
+        from rap_demo.domains.blocksworld.models import BlockState
+        from rap_demo.llm.mock import MockLLM
+
+        bus = EventBus()
+        sim_steps: list[dict[str, Any]] = []
+        bus.subscribe(EventType.ON_SIMULATE_STEP, lambda ev: sim_steps.append(ev.data))
+
+        init = BlockState(clear={"red", "blue"}, on_table={"red", "blue"}, on={}, holding=None)
+        llm = MockLLM(
+            default_response=json.dumps(
+                {"thought": "Pick red", "action": "pick_up", "block": "red", "target": None}
+            )
+        )
+        domain = BlocksworldDomain(init, ["the red block is on top of the blue block"], llm=llm, mode="hybrid")
+        mcts = MCTS(
+            world_model=domain.create_world_model(),
+            reasoning_agent=domain.create_agent(),
+            max_depth=3,
+            event_bus=bus,
+        )
+        root = MCTSNode(state=init, depth=0)
+        sim_path, _ = mcts.simulate(root)
+
+        assert len(sim_path) >= 2
+        assert len(sim_steps) == len(sim_path) - 1
+        assert sim_steps[0]["node"] is root
+        assert len(sim_steps[0]["sim_path"]) == 2
+
+    @pytest.mark.asyncio
+    async def test_controller_emits_live_tree_on_expand_and_preview_on_simulate_step(self) -> None:
+        """SearchController attaches live tree dicts to expand and simulate_step phase events without mutating root."""
+        from rap_demo.domains.blocksworld.models import BlockState
+
+        bus = EventBus()
+        init_state = BlockState(clear={"red", "blue"}, on_table={"red", "blue"}, on={}, holding=None)
+        held_state = BlockState(clear={"blue"}, on_table={"blue"}, on={}, holding="red")
+
+        class FakePhaseMCTS:
+            def __init__(self, event_bus: EventBus) -> None:
+                self.event_bus = event_bus
+                self.reasoning_agent = SimpleNamespace(llm=None)
+
+            def step_iteration(self, root: MCTSNode) -> list[MCTSNode]:
+                child = MCTSNode(state=held_state, action="pick_up(red)", parent=root, depth=1)
+                root.children.append(child)
+                self.event_bus.emit(EventType.ON_EXPAND, {"node": root, "children": [child]})
+
+                sim_node = MCTSNode(state=init_state, action="put_down(red)", parent=child, depth=2, reward=0.5)
+                self.event_bus.emit(
+                    EventType.ON_SIMULATE_STEP,
+                    {
+                        "node": child,
+                        "current_node": sim_node,
+                        "sim_path": [child, sim_node],
+                        "rollout_reward": 0.5,
+                    },
+                )
+                root.N += 1
+                return [root]
+
+            def get_best_trajectory(self, root: MCTSNode, criterion: str = "reward") -> list[MCTSNode]:
+                return [root]
+
+        mcts = FakePhaseMCTS(bus)
+        controller = SearchController(mcts=mcts, initial_state=init_state, max_iterations=3)  # type: ignore[arg-type]
+        queue = controller.subscribe()
+
+        await controller.step()
+
+        events: list[dict[str, Any]] = []
+        while not queue.empty():
+            events.append(queue.get_nowait())
+
+        expand_evs = [e for e in events if e.get("type") == "phase" and e.get("phase") == "expand"]
+        sim_step_evs = [e for e in events if e.get("type") == "phase" and e.get("phase") == "simulate_step"]
+
+        assert len(expand_evs) == 1
+        assert "tree" in expand_evs[0]
+        assert len(expand_evs[0]["tree"]["children"]) == 1
+        assert "best_path_ids" in expand_evs[0]
+
+        assert len(sim_step_evs) == 1
+        assert "tree" in sim_step_evs[0]
+        expanded_child_dict = sim_step_evs[0]["tree"]["children"][0]
+        assert len(expanded_child_dict["children"]) == 1
+        assert expanded_child_dict["children"][0].get("is_preview") is True
+        assert sim_step_evs[0]["preview_state"] is not None
+        # Real MCTSNode tree must NOT be mutated by temporary simulation preview
+        assert len(controller.root.children[0].children) == 0

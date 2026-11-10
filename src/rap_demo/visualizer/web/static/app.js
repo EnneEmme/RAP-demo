@@ -29,6 +29,8 @@ class VisualizerApp {
       reasoning: "",
       content: "",
     };
+    this.liveAutoScroll = true;
+    this.liveElements = null;
 
     // Pan & Zoom state
     this.panX = 0;
@@ -163,6 +165,17 @@ class VisualizerApp {
     if (this.tabOverview && this.tabRaw) {
       this.tabOverview.addEventListener("click", () => this.setInspectorMode("overview"));
       this.tabRaw.addEventListener("click", () => this.setInspectorMode("raw"));
+    }
+
+    if (this.thoughtDisplay) {
+      this.thoughtDisplay.addEventListener("scroll", () => {
+        if (!this.liveStream.active) return;
+        const dist =
+          this.thoughtDisplay.scrollHeight -
+          this.thoughtDisplay.scrollTop -
+          this.thoughtDisplay.clientHeight;
+        this.liveAutoScroll = dist <= 24;
+      });
     }
 
     // Pan & Zoom Controls
@@ -323,6 +336,8 @@ class VisualizerApp {
       if (endpoint.endsWith("/reset")) {
         this.selectedNode = null;
       }
+      this.liveStream.active = false;
+      this.liveElements = null;
       if (data.tree) {
         this.treeData = data.tree;
         this.syncTreeAndSelection(endpoint.endsWith("/reset"));
@@ -331,7 +346,10 @@ class VisualizerApp {
       }
     } catch (err) {
       console.error(`Error calling ${endpoint}:`, err);
+      this.liveStream.active = false;
+      this.liveElements = null;
       this.showToast(`Action failed (${endpoint.split("/").pop()}): ${err.message}`);
+      await this.fetchTreeAndState();
     } finally {
       if (isStep) {
         this.isStepping = false;
@@ -525,6 +543,7 @@ class VisualizerApp {
 
     if (payload.type === "error" && payload.message) {
       this.liveStream.active = false;
+      this.liveElements = null;
       this.showToast(payload.message);
     }
 
@@ -532,6 +551,18 @@ class VisualizerApp {
       this.liveStream.active = true;
       if (payload.iteration !== undefined) this.liveStream.iteration = payload.iteration;
       this.liveStream.phase = payload.phase || "";
+
+      if (payload.tree) {
+        this.treeData = payload.tree;
+        this.renderTree();
+        this.renderTrajectoryBar();
+      }
+      if (payload.preview_state) {
+        this.stateData = payload.preview_state;
+        this.renderTabletop();
+        this.renderStateOverview(payload.preview_state, payload.preview_state);
+      }
+
       this.renderLiveStream();
       return;
     }
@@ -543,6 +574,8 @@ class VisualizerApp {
         this.liveStream.callId = incomingCallId;
         this.liveStream.reasoning = "";
         this.liveStream.content = "";
+        this.liveElements = null;
+        this.liveAutoScroll = true;
       }
       if (payload.iteration !== undefined) this.liveStream.iteration = payload.iteration;
       if (payload.kind === "reasoning") {
@@ -557,11 +590,13 @@ class VisualizerApp {
     const isReset = payload.type === "reset";
     if (isReset || payload.type === "step") {
       this.liveStream.active = false;
+      this.liveElements = null;
       if (isReset) {
         this.liveStream.phase = "";
         this.liveStream.callId = null;
         this.liveStream.reasoning = "";
         this.liveStream.content = "";
+        this.liveAutoScroll = true;
       }
     }
     if (isReset) {
@@ -738,7 +773,11 @@ class VisualizerApp {
 
       const isBest = this.bestPathIds.has(l.source.id) && this.bestPathIds.has(l.target.id);
       const isVisited = (l.target.visits || 0) > 0;
-      path.setAttribute("class", `link ${isBest ? "best-path" : isVisited ? "visited" : ""}`);
+      const isPreview = Boolean(l.target.is_preview);
+      path.setAttribute(
+        "class",
+        `link ${isPreview ? "preview" : isBest ? "best-path" : isVisited ? "visited" : ""}`
+      );
       this.treeViewport.appendChild(path);
     });
 
@@ -748,8 +787,10 @@ class VisualizerApp {
       const isSelected = this.selectedNode && this.selectedNode.id === n.id;
       const isBest = this.bestPathIds.has(n.id);
       const isVisited = (n.visits || 0) > 0;
+      const isPreview = Boolean(n.is_preview);
 
       const classes = ["node"];
+      if (isPreview) classes.push("preview");
       if (isVisited) classes.push("visited");
       if (isBest) classes.push("best-path");
       if (n.is_terminal) classes.push("terminal");
@@ -949,27 +990,68 @@ class VisualizerApp {
       this.thoughtModeTag.classList.add("live");
     }
 
-    const parts = [];
-    if (this.liveStream.reasoning) {
-      parts.push(
-        `<div class="live-section-label">Thinking (Live)</div>` +
-        `<pre class="live-stream-pre live-reasoning">${this.escapeHtml(this.liveStream.reasoning)}</pre>`
-      );
-    }
-    if (this.liveStream.content) {
-      parts.push(
-        `<div class="live-section-label">Output (Live)</div>` +
-        `<pre class="live-stream-pre live-output">${this.escapeHtml(this.liveStream.content)}</pre>`
-      );
-    }
-    if (parts.length === 0) {
-      parts.push(
-        `<p class="empty-hint">MCTS phase <strong>${this.escapeHtml(phaseLabel)}</strong> — waiting for model stream...</p>`
-      );
+    if (!this.liveElements) {
+      this.thoughtDisplay.innerHTML = "";
+      const waitingEl = document.createElement("p");
+      waitingEl.className = "empty-hint";
+
+      const reasoningLabel = document.createElement("div");
+      reasoningLabel.className = "live-section-label";
+      reasoningLabel.textContent = "Thinking (Live)";
+      reasoningLabel.hidden = true;
+
+      const reasoningPre = document.createElement("pre");
+      reasoningPre.className = "live-stream-pre live-reasoning";
+      reasoningPre.hidden = true;
+
+      const outputLabel = document.createElement("div");
+      outputLabel.className = "live-section-label";
+      outputLabel.textContent = "Output (Live)";
+      outputLabel.hidden = true;
+
+      const outputPre = document.createElement("pre");
+      outputPre.className = "live-stream-pre live-output";
+      outputPre.hidden = true;
+
+      this.thoughtDisplay.appendChild(waitingEl);
+      this.thoughtDisplay.appendChild(reasoningLabel);
+      this.thoughtDisplay.appendChild(reasoningPre);
+      this.thoughtDisplay.appendChild(outputLabel);
+      this.thoughtDisplay.appendChild(outputPre);
+
+      this.liveElements = {
+        waitingEl,
+        reasoningLabel,
+        reasoningPre,
+        outputLabel,
+        outputPre,
+      };
     }
 
-    this.thoughtDisplay.innerHTML = parts.join("");
-    this.thoughtDisplay.scrollTop = this.thoughtDisplay.scrollHeight;
+    const els = this.liveElements;
+    const hasReasoning = Boolean(this.liveStream.reasoning);
+    const hasContent = Boolean(this.liveStream.content);
+
+    els.waitingEl.hidden = hasReasoning || hasContent;
+    if (els.waitingEl.hidden === false) {
+      els.waitingEl.innerHTML = `MCTS phase <strong>${this.escapeHtml(phaseLabel)}</strong> — waiting for model stream...`;
+    }
+
+    els.reasoningLabel.hidden = !hasReasoning;
+    els.reasoningPre.hidden = !hasReasoning;
+    if (hasReasoning) {
+      els.reasoningPre.textContent = this.liveStream.reasoning;
+    }
+
+    els.outputLabel.hidden = !hasContent;
+    els.outputPre.hidden = !hasContent;
+    if (hasContent) {
+      els.outputPre.textContent = this.liveStream.content;
+    }
+
+    if (this.liveAutoScroll) {
+      this.thoughtDisplay.scrollTop = this.thoughtDisplay.scrollHeight;
+    }
   }
 
   renderInspector(node) {
