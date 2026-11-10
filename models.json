@@ -1,5 +1,5 @@
 {
-  "default_model": "gemma4-26b",
+  "default_model": "gemma4-31b",
   "defaults": {
     "mode": "hybrid",
     "iterations": 10,
@@ -9,29 +9,15 @@
     "gemma4-26b": {
       "backend": "litellm",
       "model": "gemini/gemma-4-26b-a4b-it",
-      "tpm": 15000,
+      "tpm": 16000,
       "rpm": 30,
       "timeout": 30.0
     },
     "gemma4-31b": {
       "backend": "litellm",
       "model": "gemini/gemma-4-31b-it",
-      "tpm": 15000,
+      "tpm": 16000,
       "rpm": 30,
-      "timeout": 30.0
-    },
-    "gpt-4o-mini": {
-      "backend": "litellm",
-      "model": "openai/gpt-4o-mini",
-      "tpm": 200000,
-      "rpm": 500,
-      "timeout": 30.0
-    },
-    "claude-sonnet": {
-      "backend": "litellm",
-      "model": "anthropic/claude-3-5-sonnet-20241022",
-      "tpm": 40000,
-      "rpm": 50,
       "timeout": 30.0
     },
     "local-llama": {
