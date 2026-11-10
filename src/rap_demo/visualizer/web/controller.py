@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import sys
+import time
 from collections.abc import Callable
 from enum import Enum
 from typing import Any, Optional
@@ -119,7 +120,20 @@ class SearchController:
             }
 
         if self.mcts is not None:
+            next_iter = self._iteration + 1
+            t0 = time.perf_counter()
+            print(
+                f"[RAP] Starting MCTS iteration {next_iter}/{self.max_iterations}...",
+                file=sys.stderr,
+                flush=True,
+            )
             await asyncio.to_thread(self.mcts.step_iteration, self._root)
+            elapsed = time.perf_counter() - t0
+            print(
+                f"[RAP] Completed MCTS iteration {next_iter}/{self.max_iterations} in {elapsed:.2f}s",
+                file=sys.stderr,
+                flush=True,
+            )
 
         self._iteration += 1
 

@@ -334,7 +334,7 @@ class VisualizerApp {
     if (this.btnStep) {
       this.btnStep.disabled = pending;
       const label = this.btnStep.querySelector("span");
-      if (label) label.textContent = pending ? "Running..." : "Step";
+      if (label) label.textContent = pending ? "Stepping..." : "Step";
     }
     if (this.btnPlay && pending) {
       this.btnPlay.disabled = true;

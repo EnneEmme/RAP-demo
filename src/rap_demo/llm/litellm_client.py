@@ -324,13 +324,25 @@ class LiteLLMClient(BaseLLM):
 
         for attempt in range(self.max_retries + 1):
             if self.rate_limiter is not None:
-                self.rate_limiter.acquire(estimated_tokens)
+                waited = self.rate_limiter.acquire(estimated_tokens)
+                if waited > 0.1:
+                    print(
+                        f"[RateLimiter] Waited {waited:.1f}s before calling {self.model}",
+                        file=sys.stderr,
+                        flush=True,
+                    )
             self._call_count += 1
             try:
                 response = fn(**kwargs)
             except Exception as exc:
                 if _is_retryable_error(exc) and attempt < self.max_retries:
-                    self._sleeper(0.5 * (2**attempt))
+                    delay = 0.5 * (2**attempt)
+                    print(
+                        f"[LiteLLM] Transient error on {self.model} (attempt {attempt + 1}/{self.max_retries}), retrying in {delay:.1f}s: {exc}",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                    self._sleeper(delay)
                     continue
                 raise
 
