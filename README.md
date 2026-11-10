@@ -87,6 +87,22 @@ rap compare --backend mock --iterations 10
 rap compare --backend litellm --model openai/gpt-4o-mini --tpm 30000 --iterations 10
 ```
 
+### 4. Cache & Replay delle Run (`rap history` / `rap replay`)
+
+Ogni esecuzione (`rap run` e `rap ui` al termine) salva automaticamente un file JSON in `runs/` con **data, modello, backend, iterazioni, metriche e albero MCTS completo** (usa `--no-save` per disabilitare). Puoi rivedere i risultati salvati senza consumare token API:
+
+```bash
+# Elenca le run salvate
+rap history
+
+# Rivedi l'ultima run (o l'indice #1, #2...) da terminale
+rap replay latest -v
+rap replay 1 -v
+
+# Riapri una run salvata nella Web UI (zero chiamate LLM)
+rap replay latest --ui --port 8000
+```
+
 ---
 
 ## Flag Principali

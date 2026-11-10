@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
+from collections.abc import Callable
 from enum import Enum
 from typing import Any, Optional
 
-from rap_demo.core.mcts import MCTS
+from rap_demo.core.mcts import MCTS, extract_best_trajectory
 from rap_demo.core.node import MCTSNode
 from rap_demo.visualizer.serializer import serialize_tree
 
@@ -29,17 +31,60 @@ class SearchController:
         initial_state: Optional[Any] = None,
         max_iterations: int = 50,
         step_delay: float = 0.05,
+        goal: Optional[Any] = None,
+        mode: Optional[str] = None,
+        root: Optional[MCTSNode] = None,
+        initial_iteration: int = 0,
+        initial_status: Optional[SearchStatus] = None,
+        on_finish: Optional[Callable[[SearchController], Any]] = None,
     ) -> None:
         self.mcts: Optional[MCTS] = mcts
         self.initial_state: Any = initial_state if initial_state is not None else "initial"
         self.max_iterations: int = max_iterations
         self.step_delay: float = step_delay
+        self.goal: Optional[Any] = goal
+        self.mode: Optional[str] = mode
 
-        self._status: SearchStatus = SearchStatus.IDLE
-        self._iteration: int = 0
-        self._root: MCTSNode = MCTSNode(state=self.initial_state, depth=0)
+        self._status: SearchStatus = (
+            initial_status if initial_status is not None else SearchStatus.IDLE
+        )
+        self._iteration: int = initial_iteration
+        self._root: MCTSNode = (
+            root if root is not None else MCTSNode(state=self.initial_state, depth=0)
+        )
+        self._on_finish: Optional[Callable[[SearchController], Any]] = on_finish
+        self._finish_notified: bool = self._status == SearchStatus.FINISHED
         self._subscribers: set[asyncio.Queue[dict[str, Any]]] = set()
         self._running_task: Optional[asyncio.Task[None]] = None
+
+    def set_step_delay(self, delay_seconds: float) -> float:
+        """Updates step delay (clamped to [0.01s, 2.0s]) for live playback control."""
+        clamped = max(0.01, min(2.0, float(delay_seconds)))
+        self.step_delay = clamped
+        return clamped
+
+    def _get_best_trajectory(self) -> list[MCTSNode]:
+        """Return best trajectory via MCTS engine or standalone extractor."""
+        if self.mcts is not None:
+            traj = self.mcts.get_best_trajectory(self._root)
+        else:
+            traj = extract_best_trajectory(self._root)
+        return traj if traj else [self._root]
+
+    async def _notify_finish_once(self) -> None:
+        """Invoke on_finish callback at most once per search completion."""
+        if self._finish_notified:
+            return
+        self._finish_notified = True
+        if self._on_finish is not None:
+            result = self._on_finish(self)
+            if inspect.isawaitable(result):
+                await result
+
+    def get_best_path_ids(self) -> list[str]:
+        """Returns serialized node IDs along the current best trajectory."""
+        traj = self._get_best_trajectory()
+        return [f"node_{id(n)}" for n in traj]
 
     @property
     def status(self) -> SearchStatus:
@@ -59,16 +104,13 @@ class SearchController:
     @property
     def current_state(self) -> Any:
         """Current state at the most promising node of best trajectory."""
-        if self.mcts is not None:
-            best_traj = self.mcts.get_best_trajectory(self._root)
-            if best_traj:
-                return best_traj[-1].state
-        return self._root.state
+        return self._get_best_trajectory()[-1].state
 
     async def step(self) -> dict[str, Any]:
         """Runs exactly one MCTS iteration and emits events."""
         if self._iteration >= self.max_iterations:
             self._status = SearchStatus.FINISHED
+            await self._notify_finish_once()
             return {
                 "status": self._status,
                 "iteration": self._iteration,
@@ -83,18 +125,23 @@ class SearchController:
         if self._iteration >= self.max_iterations:
             self._status = SearchStatus.FINISHED
 
-        best_traj = self.mcts.get_best_trajectory(self._root) if self.mcts else [self._root]
-        best_node = best_traj[-1] if best_traj else self._root
+        best_traj = self._get_best_trajectory()
+        best_node = best_traj[-1]
 
         payload = {
             "type": "step",
             "iteration": self._iteration,
+            "max_iterations": self.max_iterations,
             "status": self._status.value,
             "tree": serialize_tree(self._root),
             "best_node_id": f"node_{id(best_node)}",
+            "best_path_ids": [f"node_{id(n)}" for n in best_traj],
             "thought": getattr(best_node, "thought", None) or (getattr(best_node.action, "thought", None) if best_node.action else None),
         }
         await self.emit_event("step", payload)
+
+        if self._status == SearchStatus.FINISHED:
+            await self._notify_finish_once()
 
         return {
             "status": self._status,
@@ -161,13 +208,16 @@ class SearchController:
 
         self._status = SearchStatus.IDLE
         self._iteration = 0
+        self._finish_notified = False
         self._root = MCTSNode(state=self.initial_state, depth=0)
 
         payload = {
             "type": "reset",
             "iteration": 0,
+            "max_iterations": self.max_iterations,
             "status": self._status.value,
             "tree": serialize_tree(self._root),
+            "best_path_ids": self.get_best_path_ids(),
         }
         await self.emit_event("reset", payload)
 

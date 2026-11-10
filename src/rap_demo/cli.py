@@ -17,7 +17,7 @@ from typing import Any, Sequence
 from rich.console import Console
 from rich.table import Table
 
-from rap_demo.core.mcts import MCTS
+from rap_demo.core.mcts import MCTS, extract_best_trajectory
 from rap_demo.core.node import MCTSNode
 from rap_demo.domains.blocksworld.domain import BlocksworldDomain
 from rap_demo.domains.blocksworld.models import BlockState
@@ -25,9 +25,16 @@ from rap_demo.llm.base import BaseLLM, LLMError
 from rap_demo.llm.factory import get_llm
 from rap_demo.llm.litellm_client import _load_dotenv_file
 from rap_demo.llm.mock import MockLLM
+from rap_demo.storage import (
+    deserialize_tree,
+    get_runs_dir,
+    list_runs,
+    load_run,
+    save_run,
+)
 from rap_demo.visualizer.console import RichMCTSConsole
 import rap_demo.visualizer.web.app
-from rap_demo.visualizer.web.controller import SearchController
+from rap_demo.visualizer.web.controller import SearchController, SearchStatus
 
 SUPPORTED_DOMAINS: set[str] = {"blocksworld"}
 
@@ -220,6 +227,21 @@ def _print_backend_error_tip(err_console: Console, backend: str) -> None:
         )
 
 
+def _add_storage_arguments(subparser: argparse.ArgumentParser) -> None:
+    """Register shared run persistence flags on run/ui subparsers."""
+    subparser.add_argument(
+        "--runs-dir",
+        default=None,
+        help="Directory to store run JSON snapshots (default: $RAP_RUNS_DIR or ./runs)",
+    )
+    subparser.add_argument(
+        "--no-save",
+        action="store_true",
+        default=False,
+        help="Do not automatically save run results to disk",
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Builds and returns the top-level argument parser for the rap CLI.
 
@@ -227,6 +249,8 @@ def build_parser() -> argparse.ArgumentParser:
     - `run`: Terminal-based MCTS search execution.
     - `ui`: Real-time web visualizer server.
     - `compare`: Side-by-side mode comparison.
+    - `history` (`runs`): List saved runs.
+    - `replay`: Replay a cached run without making LLM calls.
 
     Returns:
         Configured ArgumentParser instance.
@@ -251,6 +275,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Reasoning mode (choices: hybrid, paper; default: hybrid)",
     )
     _add_llm_arguments(run_parser)
+    _add_storage_arguments(run_parser)
     run_parser.add_argument(
         "--iterations",
         type=int,
@@ -290,6 +315,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Reasoning mode (choices: hybrid, paper; default: hybrid)",
     )
     _add_llm_arguments(ui_parser)
+    _add_storage_arguments(ui_parser)
     ui_parser.add_argument(
         "--iterations",
         type=int,
@@ -317,6 +343,65 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         default=False,
         help="Print detailed search trees for both modes",
+    )
+
+    # 4. `rap history` (alias: `runs`)
+    history_parser = subparsers.add_parser(
+        "history",
+        aliases=["runs"],
+        help="List saved MCTS runs",
+    )
+    history_parser.add_argument(
+        "--runs-dir",
+        default=None,
+        help="Directory containing saved runs (default: $RAP_RUNS_DIR or ./runs)",
+    )
+    history_parser.add_argument(
+        "--limit",
+        type=int,
+        default=20,
+        help="Maximum number of recent runs to show (default: 20)",
+    )
+
+    # 5. `rap replay`
+    replay_parser = subparsers.add_parser(
+        "replay",
+        help="Replay a saved MCTS run without LLM API calls",
+    )
+    replay_parser.add_argument(
+        "ref",
+        nargs="?",
+        default="latest",
+        help="Run reference ('latest', 1-based index, run_id/prefix, or path; default: latest)",
+    )
+    replay_parser.add_argument(
+        "--ui",
+        action="store_true",
+        default=False,
+        help="Launch the Web UI preloaded with the cached run",
+    )
+    replay_parser.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help="Host address for replay Web UI (default: 127.0.0.1)",
+    )
+    replay_parser.add_argument(
+        "--port",
+        type=int,
+        default=8000,
+        help="Port for replay Web UI (default: 8000)",
+    )
+    replay_parser.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        default=False,
+        help="Print full search tree in terminal replay mode",
+    )
+    replay_parser.add_argument(
+        "--runs-dir",
+        default=None,
+        help="Directory containing saved runs (default: $RAP_RUNS_DIR or ./runs)",
     )
 
     return parser
@@ -378,6 +463,23 @@ def cmd_run(args: argparse.Namespace) -> int:
             metrics["LLM Calls"] = llm.call_count
 
         visualizer.print_summary(best_path, metrics=metrics)
+
+        if not getattr(args, "no_save", False):
+            saved_path = save_run(
+                root,
+                domain=args.domain,
+                mode=args.mode,
+                backend=args.backend,
+                model=getattr(args, "model", None) or getattr(llm, "model", None),
+                iterations=args.iterations,
+                goal=DEFAULT_GOAL,
+                command="run",
+                metrics=metrics,
+                best_path=best_path,
+                runs_dir=getattr(args, "runs_dir", None),
+            )
+            console.print(f"[dim]Saved run to {saved_path}[/dim]")
+
         return 0
     except (ConnectionError, ValueError, LLMError) as exc:
         err_console.print(f"[bold red]Error:[/bold red] {exc}")
@@ -429,12 +531,39 @@ def cmd_ui(args: argparse.Namespace) -> int:
             reasoning_agent=domain.create_agent(),
             max_depth=6,
         )
+        def _save_ui_run(ctrl: SearchController) -> None:
+            best_traj = extract_best_trajectory(ctrl.root)
+            best_reward = best_traj[-1].reward if best_traj else 0.0
+            ui_metrics: dict[str, Any] = {
+                "Iterations": ctrl.iteration,
+                "Best Reward": f"{best_reward:.2f}",
+                "Trajectory Steps": max(0, len(best_traj) - 1),
+            }
+            if hasattr(llm, "call_count"):
+                ui_metrics["LLM Calls"] = llm.call_count
+            save_run(
+                ctrl.root,
+                domain=args.domain,
+                mode=args.mode,
+                backend=args.backend,
+                model=getattr(args, "model", None) or getattr(llm, "model", None),
+                iterations=ctrl.iteration,
+                goal=DEFAULT_GOAL,
+                command="ui",
+                metrics=ui_metrics,
+                best_path=best_traj,
+                runs_dir=getattr(args, "runs_dir", None),
+            )
+
+        on_finish = None if getattr(args, "no_save", False) else _save_ui_run
+
         controller = SearchController(
             mcts=mcts,
             initial_state=domain.get_initial_state(),
             max_iterations=args.iterations,
             goal=DEFAULT_GOAL,
             mode=args.mode,
+            on_finish=on_finish,
         )
 
         create_app_fn = sys.modules["rap_demo.visualizer.web.app"].create_app
@@ -551,6 +680,114 @@ def cmd_compare(args: argparse.Namespace) -> int:
         return 1
 
 
+def cmd_history(args: argparse.Namespace) -> int:
+    """Lists saved MCTS search runs from disk."""
+    console = Console()
+    err_console = Console(stderr=True)
+    limit = getattr(args, "limit", 20)
+    if limit is not None and limit <= 0:
+        err_console.print(f"[bold red]Error:[/bold red] Limit must be positive, got {limit}.")
+        return 1
+
+    runs_dir_arg = getattr(args, "runs_dir", None)
+    runs = list_runs(runs_dir=runs_dir_arg, limit=limit)
+    if not runs:
+        console.print(f"No saved runs found in '{get_runs_dir(runs_dir_arg)}'.")
+        return 0
+
+    table = Table(
+        title="Saved RAP Runs",
+        show_header=True,
+        header_style="bold magenta",
+    )
+    table.add_column("#", style="cyan", justify="right", no_wrap=True)
+    table.add_column("Run ID", style="green")
+    table.add_column("Domain", style="white", no_wrap=True)
+    table.add_column("Mode", style="yellow", no_wrap=True)
+    table.add_column("Backend", style="blue", no_wrap=True)
+    table.add_column("Iter", justify="right", no_wrap=True)
+    table.add_column("Reward", justify="right", no_wrap=True)
+
+    for idx, run in enumerate(runs, start=1):
+        metrics = run.get("metrics") or {}
+        best_reward = str(metrics.get("Best Reward", "-"))
+        backend_label = str(run.get("backend", ""))
+        if run.get("model"):
+            backend_label = f"{backend_label} ({run['model']})"
+        table.add_row(
+            str(idx),
+            str(run.get("run_id", "")),
+            str(run.get("domain", "")),
+            str(run.get("mode", "")),
+            backend_label,
+            str(run.get("iterations", 0)),
+            best_reward,
+        )
+
+    console.print(table)
+    return 0
+
+
+def cmd_replay(args: argparse.Namespace) -> int:
+    """Replays a saved MCTS run in terminal or Web UI without invoking any LLM."""
+    console = Console()
+    err_console = Console(stderr=True)
+
+    if getattr(args, "ui", False) and (args.port < 1 or args.port > 65535):
+        err_console.print(
+            f"[bold red]Error:[/bold red] Port must be between 1 and 65535, got {args.port}."
+        )
+        return 1
+
+    try:
+        run_data = load_run(
+            getattr(args, "ref", "latest"),
+            runs_dir=getattr(args, "runs_dir", None),
+        )
+        root = deserialize_tree(run_data["tree"])
+    except (FileNotFoundError, ValueError, KeyError, OSError) as exc:
+        err_console.print(f"[bold red]Replay Error:[/bold red] {exc}")
+        return 1
+
+    if getattr(args, "ui", False):
+        try:
+            iterations = int(run_data.get("iterations", 0))
+            controller = SearchController(
+                mcts=None,
+                initial_state=root.state,
+                max_iterations=iterations,
+                goal=run_data.get("goal"),
+                mode=run_data.get("mode"),
+                root=root,
+                initial_iteration=iterations,
+                initial_status=SearchStatus.FINISHED,
+            )
+            create_app_fn = sys.modules["rap_demo.visualizer.web.app"].create_app
+            app = create_app_fn(controller)
+            import uvicorn
+
+            uvicorn.run(app, host=args.host, port=args.port)
+            return 0
+        except OSError as exc:
+            err_console.print(f"[bold red]Server Bind Error:[/bold red] {exc}")
+            return 1
+
+    console.print(
+        f"[bold cyan]Replaying Run:[/bold cyan] {run_data.get('run_id', 'unknown')} "
+        f"| domain={run_data.get('domain')} mode={run_data.get('mode')} "
+        f"backend={run_data.get('backend')} model={run_data.get('model') or '-'} "
+        f"iterations={run_data.get('iterations')} created_at={run_data.get('created_at')}"
+    )
+    visualizer = RichMCTSConsole(console=console)
+    if getattr(args, "verbose", False):
+        visualizer.print_tree(root)
+
+    best_path = extract_best_trajectory(root)
+    metrics = run_data.get("metrics") or {"Iterations": run_data.get("iterations", 0)}
+    visualizer.print_summary(best_path, metrics=metrics)
+    return 0
+
+
 def main(args: Sequence[str] | None = None) -> int:
     """Main CLI entrypoint for the `rap` command.
 
@@ -589,6 +826,10 @@ def main(args: Sequence[str] | None = None) -> int:
             return cmd_ui(parsed_args)
         elif command == "compare":
             return cmd_compare(parsed_args)
+        elif command in ("history", "runs"):
+            return cmd_history(parsed_args)
+        elif command == "replay":
+            return cmd_replay(parsed_args)
         else:
             parser.print_help(file=sys.stderr)
             return 1

@@ -55,5 +55,8 @@ htmlcov/
 .env.*
 !.env.example
 
+# Cached MCTS Runs
+runs/
+
 # Project specific
 data/RAP repo paper/.git
