@@ -676,3 +676,43 @@ class TestRealTimeTreeAndPreviewStreaming:
         assert sim_step_evs[0]["preview_state"] is not None
         # Real MCTSNode tree must NOT be mutated by temporary simulation preview
         assert len(controller.root.children[0].children) == 0
+
+    def test_streaming_retries_on_midstream_fallback_error_and_falls_back_non_streaming(self) -> None:
+        """_generate_streaming retries MidStreamFallbackError and falls back to non-streaming if stream keeps failing."""
+        from litellm.exceptions import MidStreamFallbackError
+
+        attempts: list[bool] = []
+        emitted: list[tuple[str, str]] = []
+
+        def fake_completion(**kwargs: Any) -> Any:
+            is_stream = bool(kwargs.get("stream"))
+            attempts.append(is_stream)
+            if is_stream:
+                def failing_stream() -> Any:
+                    raise MidStreamFallbackError(
+                        message="Internal error encountered.",
+                        model="gemini/gemma-4-26b-a4b-it",
+                        llm_provider="gemini",
+                    )
+                    yield  # pragma: no cover
+
+                return failing_stream()
+
+            return SimpleNamespace(
+                choices=[SimpleNamespace(message=SimpleNamespace(content="fallback ok"))]
+            )
+
+        client = LiteLLMClient(
+            model="gemini/gemma-4-26b-a4b-it",
+            max_retries=1,
+            sleeper=lambda _: None,
+            on_token=lambda k, t: emitted.append((k, t)),
+            completion_fn=fake_completion,
+        )
+
+        out = client.generate("prompt")
+        assert out == "fallback ok"
+        # 2 stream attempts (1 initial + 1 retry), then 1 non-streaming fallback
+        assert attempts == [True, True, False]
+        assert emitted == [("content", "fallback ok")]
+

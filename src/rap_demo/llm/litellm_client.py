@@ -382,15 +382,15 @@ class LiteLLMClient(BaseLLM):
 
         raise LLMError("LiteLLM completion failed after exhausting retries")
 
-    def _generate_streaming(
+    def _open_stream(
         self,
         prompt: str,
         *,
         max_tokens: int,
         temperature: float,
         stop: list[str] | None,
-    ) -> str:
-        """Stream completion chunks, emit on_token callbacks, and return assembled text."""
+    ) -> tuple[Any, dict[str, Any]]:
+        """Open a streaming completion request, falling back if stream_options is unsupported."""
         kwargs = self._build_completion_kwargs(
             prompt,
             max_tokens=max_tokens,
@@ -400,7 +400,7 @@ class LiteLLMClient(BaseLLM):
             stream_options={"include_usage": True},
         )
         try:
-            raw_stream = self._invoke_completion(kwargs)
+            return self._invoke_completion(kwargs), kwargs
         except Exception as exc:
             if not _is_unsupported_param_error(
                 exc,
@@ -415,55 +415,128 @@ class LiteLLMClient(BaseLLM):
                 stream=True,
             )
             try:
-                raw_stream = self._invoke_completion(kwargs_no_opts)
+                return self._invoke_completion(kwargs_no_opts), kwargs_no_opts
             except Exception as retry_exc:
                 raise _map_exception(retry_exc) from retry_exc
 
-        callback = self.on_token
-        if not _is_chunk_stream(raw_stream):
-            choice = _extract_first_choice(raw_stream)
-            if choice is None:
-                raise LLMError("Malformed LLM response: missing or empty choices")
-            content = _extract_message_content(choice)
-            if content is None:
-                raise LLMError("Malformed LLM response: missing message content")
-            if content and callback is not None:
-                callback("content", content)
-            return content
-
-        estimated_tokens = self._estimate_request_tokens(kwargs)
-        content_parts: list[str] = []
-        reasoning_parts: list[str] = []
-        saw_content_field = False
-
+    def _generate_non_streaming(
+        self,
+        prompt: str,
+        *,
+        max_tokens: int,
+        temperature: float,
+        stop: list[str] | None,
+    ) -> str:
+        """Execute non-streaming completion request and extract text content."""
+        kwargs = self._build_completion_kwargs(
+            prompt,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            stop=stop,
+        )
         try:
-            for chunk in raw_stream:
-                self._record_usage(estimated_tokens, chunk)
-                choice = _extract_first_choice(chunk)
-                if choice is None:
-                    continue
-                delta = _get_field(choice, "delta")
-                if delta is None:
-                    continue
-                if _get_field(delta, "content") is not None:
-                    saw_content_field = True
-                for kind, text in _extract_delta_segments(delta):
-                    if kind == "reasoning":
-                        reasoning_parts.append(text)
-                    else:
-                        content_parts.append(text)
-                    if callback is not None:
-                        callback(kind, text)
+            response = self._invoke_completion(kwargs)
         except Exception as exc:
             raise _map_exception(exc) from exc
 
-        if content_parts:
-            return "".join(content_parts)
-        if reasoning_parts:
-            return "".join(reasoning_parts)
-        if saw_content_field:
-            return ""
-        raise LLMError("Malformed LLM streaming response: empty stream with no content")
+        choice = _extract_first_choice(response)
+        if choice is None:
+            raise LLMError("Malformed LLM response: missing or empty choices")
+
+        content = _extract_message_content(choice)
+        if content is None:
+            raise LLMError("Malformed LLM response: missing message content")
+
+        return content
+
+    def _generate_streaming(
+        self,
+        prompt: str,
+        *,
+        max_tokens: int,
+        temperature: float,
+        stop: list[str] | None,
+    ) -> str:
+        """Stream completion chunks, retrying transient errors with non-streaming fallback."""
+        callback = self.on_token
+
+        for attempt in range(self.max_retries + 1):
+            raw_stream, kwargs = self._open_stream(
+                prompt,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                stop=stop,
+            )
+            if not _is_chunk_stream(raw_stream):
+                choice = _extract_first_choice(raw_stream)
+                if choice is None:
+                    raise LLMError("Malformed LLM response: missing or empty choices")
+                content = _extract_message_content(choice)
+                if content is None:
+                    raise LLMError("Malformed LLM response: missing message content")
+                if content and callback is not None:
+                    callback("content", content)
+                return content
+
+            estimated_tokens = self._estimate_request_tokens(kwargs)
+            content_parts: list[str] = []
+            reasoning_parts: list[str] = []
+            saw_content_field = False
+
+            try:
+                for chunk in raw_stream:
+                    self._record_usage(estimated_tokens, chunk)
+                    choice = _extract_first_choice(chunk)
+                    if choice is None:
+                        continue
+                    delta = _get_field(choice, "delta")
+                    if delta is None:
+                        continue
+                    if _get_field(delta, "content") is not None:
+                        saw_content_field = True
+                    for kind, text in _extract_delta_segments(delta):
+                        if kind == "reasoning":
+                            reasoning_parts.append(text)
+                        else:
+                            content_parts.append(text)
+                        if callback is not None:
+                            callback(kind, text)
+            except Exception as exc:
+                if _is_retryable_error(exc) and not content_parts and not reasoning_parts:
+                    if attempt < self.max_retries:
+                        delay = 0.5 * (2**attempt)
+                        print(
+                            f"[LiteLLM] Mid-stream transient error on {self.model} (attempt {attempt + 1}/{self.max_retries}), retrying in {delay:.1f}s: {exc}",
+                            file=sys.stderr,
+                            flush=True,
+                        )
+                        self._sleeper(delay)
+                        continue
+                    print(
+                        f"[LiteLLM] Streaming failed on {self.model}; falling back to non-streaming mode.",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                    fallback_text = self._generate_non_streaming(
+                        prompt,
+                        max_tokens=max_tokens,
+                        temperature=temperature,
+                        stop=stop,
+                    )
+                    if fallback_text and callback is not None:
+                        callback("content", fallback_text)
+                    return fallback_text
+                raise _map_exception(exc) from exc
+
+            if content_parts:
+                return "".join(content_parts)
+            if reasoning_parts:
+                return "".join(reasoning_parts)
+            if saw_content_field:
+                return ""
+            raise LLMError("Malformed LLM streaming response: empty stream with no content")
+
+        raise LLMError("LiteLLM streaming completion failed after exhausting retries")
 
     def generate(
         self,
@@ -496,26 +569,12 @@ class LiteLLMClient(BaseLLM):
                 stop=stop,
             )
 
-        kwargs = self._build_completion_kwargs(
+        return self._generate_non_streaming(
             prompt,
             max_tokens=max_tokens,
             temperature=temperature,
             stop=stop,
         )
-        try:
-            response = self._invoke_completion(kwargs)
-        except Exception as exc:
-            raise _map_exception(exc) from exc
-
-        choice = _extract_first_choice(response)
-        if choice is None:
-            raise LLMError("Malformed LLM response: missing or empty choices")
-
-        content = _extract_message_content(choice)
-        if content is None:
-            raise LLMError("Malformed LLM response: missing message content")
-
-        return content
 
     def get_logprobs(self, prompt: str, target: str) -> float:
         """Calculate total log-probability of target string given prompt.
