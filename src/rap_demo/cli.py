@@ -48,6 +48,8 @@ def _create_llm(
     backend: str,
     model: str | None = None,
     api_base: str | None = None,
+    tpm: int | None = None,
+    rpm: int | None = None,
 ) -> BaseLLM:
     """Instantiates and configures LLM backend for planning.
 
@@ -55,6 +57,8 @@ def _create_llm(
         backend: Backend identifier ('mock', 'llama-server', or 'litellm').
         model: Optional model identifier forwarded to non-mock backends.
         api_base: Optional custom API base URL forwarded when provided.
+        tpm: Optional tokens-per-minute rate limit for LiteLLM backend.
+        rpm: Optional requests-per-minute rate limit for LiteLLM backend.
 
     Returns:
         Configured BaseLLM instance.
@@ -137,15 +141,32 @@ def _create_llm(
 
     _load_dotenv_file()
 
+    normalized = backend.strip().lower().replace("-", "_")
     kwargs: dict[str, Any] = {}
     if model is not None:
         kwargs["model"] = model
     if api_base is not None:
-        if backend.strip().lower().replace("-", "_") in ("llama", "llama_server"):
+        if normalized in ("llama", "llama_server"):
             kwargs["base_url"] = api_base
         else:
             kwargs["api_base"] = api_base
+    if normalized in ("litellm", "lite_llm"):
+        if tpm is not None:
+            kwargs["tokens_per_minute"] = tpm
+        if rpm is not None:
+            kwargs["requests_per_minute"] = rpm
     return get_llm(backend, **kwargs)
+
+
+def _create_llm_from_args(args: argparse.Namespace) -> BaseLLM:
+    """Create a configured LLM backend from parsed CLI arguments."""
+    return _create_llm(
+        args.backend,
+        model=getattr(args, "model", None),
+        api_base=getattr(args, "api_base", None),
+        tpm=getattr(args, "tpm", None),
+        rpm=getattr(args, "rpm", None),
+    )
 
 
 def _add_llm_arguments(subparser: argparse.ArgumentParser) -> None:
@@ -165,6 +186,18 @@ def _add_llm_arguments(subparser: argparse.ArgumentParser) -> None:
         "--api-base",
         default=None,
         help="Optional custom API base URL for LLM backend requests",
+    )
+    subparser.add_argument(
+        "--tpm",
+        type=int,
+        default=None,
+        help="Max tokens per minute (TPM) rate limit",
+    )
+    subparser.add_argument(
+        "--rpm",
+        type=int,
+        default=None,
+        help="Max requests per minute (RPM) rate limit",
     )
 
 
@@ -315,11 +348,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         return 1
 
     try:
-        llm = _create_llm(
-            args.backend,
-            model=getattr(args, "model", None),
-            api_base=getattr(args, "api_base", None),
-        )
+        llm = _create_llm_from_args(args)
         domain = BlocksworldDomain(
             initial_state=DEFAULT_INITIAL_STATE,
             goal=DEFAULT_GOAL,
@@ -388,11 +417,7 @@ def cmd_ui(args: argparse.Namespace) -> int:
         return 1
 
     try:
-        llm = _create_llm(
-            args.backend,
-            model=getattr(args, "model", None),
-            api_base=getattr(args, "api_base", None),
-        )
+        llm = _create_llm_from_args(args)
         domain = BlocksworldDomain(
             initial_state=DEFAULT_INITIAL_STATE,
             goal=DEFAULT_GOAL,
@@ -453,11 +478,8 @@ def cmd_compare(args: argparse.Namespace) -> int:
         return 1
 
     try:
-        model = getattr(args, "model", None)
-        api_base = getattr(args, "api_base", None)
-
         # 1. Execute Hybrid Mode
-        llm_hybrid = _create_llm(args.backend, model=model, api_base=api_base)
+        llm_hybrid = _create_llm_from_args(args)
         domain_hybrid = BlocksworldDomain(
             initial_state=DEFAULT_INITIAL_STATE,
             goal=DEFAULT_GOAL,
@@ -477,7 +499,7 @@ def cmd_compare(args: argparse.Namespace) -> int:
         calls_hybrid = getattr(llm_hybrid, "call_count", 0)
 
         # 2. Execute Paper Mode
-        llm_paper = _create_llm(args.backend, model=model, api_base=api_base)
+        llm_paper = _create_llm_from_args(args)
         domain_paper = BlocksworldDomain(
             initial_state=DEFAULT_INITIAL_STATE,
             goal=DEFAULT_GOAL,

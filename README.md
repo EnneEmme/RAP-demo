@@ -1,6 +1,6 @@
 # RAP Demo
 
-Implementazione di **Reasoning via Planning (RAP)** con **MCTS** su Blocksworld, supporto **Hybrid / Paper mode**, modelli locali (`llama-server`), API esterne (`litellm`) e dashboard Web in tempo reale.
+Implementazione di **Reasoning via Planning (RAP)** con **MCTS** su Blocksworld, supporto **Hybrid / Paper mode**, modelli locali (`llama.cpp`), API esterne (`litellm`) con vincoli TPM/RPM e dashboard Web in tempo reale.
 
 ---
 
@@ -16,9 +16,9 @@ uv pip install -e ".[dev]"
 
 ---
 
-## Configurazione API (`.env`)
+## Configurazione `.env` (API Esterne & Limiti)
 
-Per usare provider esterni con `--backend litellm`, copia `.env.example` in `.env` e inserisci la tua API key:
+Per usare API esterne con `--backend litellm`, copia `.env.example` in `.env` e inserisci la tua API key:
 
 ```bash
 cp .env.example .env
@@ -28,11 +28,29 @@ cp .env.example .env
 OPENAI_API_KEY=sk-...
 # ANTHROPIC_API_KEY=sk-ant-...
 # GEMINI_API_KEY=...
-# OPENROUTER_API_KEY=...
 # GROQ_API_KEY=...
+
+# Limiti opzionali (Token/Richieste al minuto)
+# RAP_TPM=30000
+# RAP_RPM=60
 ```
 
 Il file `.env` viene caricato automaticamente all'avvio.
+
+---
+
+## Attivare `llama.cpp` (Modello Locale)
+
+1. **Installa `llama.cpp`** (macOS con Homebrew):
+   ```bash
+   brew install llama.cpp
+   ```
+2. **Avvia il server locale** in un terminale dedicato scaricando automaticamente un modello GGUF da Hugging Face (`-hf`) con GPU Metal (`-ngl 99`):
+   ```bash
+   llama-server -hf saidutta69/LFM3-VL-2B-heretic --port 8080 -ngl 99
+   ```
+   *(Puoi sostituire il repo con qualsiasi modello GGUF, es. `LiquidAI/LFM3-1.7B-GGUF`.)*
+3. Lascia aperto quel terminale e usa `--backend llama-server` nei comandi `rap` qui sotto.
 
 ---
 
@@ -41,28 +59,24 @@ Il file `.env` viene caricato automaticamente all'avvio.
 ### 1. Esecuzione da terminale (`rap run`)
 
 ```bash
-# Test rapido offline (MockLLM)
+# Mock offline (nessun modello richiesto)
 rap run --iterations 10 -v
 
-# API esterne via LiteLLM (OpenAI, Anthropic, Gemini, ecc.)
-rap run --backend litellm --model openai/gpt-4o-mini --iterations 10 -v
+# API esterne via LiteLLM + vincoli token/minuto
+rap run --backend litellm --model openai/gpt-4o-mini --tpm 30000 --rpm 60 --iterations 10 -v
 rap run --backend litellm --model anthropic/claude-3-5-sonnet-20241022 --iterations 10 -v
 
-# Endpoint OpenAI-compatible custom
-rap run --backend litellm --model openai/my-model --api-base https://api.example.com/v1
-
-# Modello locale con llama.cpp
-llama-server -hf saidutta69/LFM3-VL-2B-heretic --port 8080 -ngl 99
+# Modello locale via llama-server (avviato sopra)
 rap run --backend llama-server --iterations 10 -v
 ```
 
 ### 2. Dashboard Web (`rap ui`)
 
-Avvia il server e apri `http://127.0.0.1:8000` nel browser:
+Il modello e il backend si scelgono **direttamente dal comando nel terminale** (nessun selettore nella UI web). Avvia il comando e apri `http://127.0.0.1:8000`:
 
 ```bash
 rap ui --backend mock
-rap ui --backend litellm --model gpt-4o-mini --port 8000
+rap ui --backend litellm --model openai/gpt-4o-mini --tpm 30000 --port 8000
 rap ui --backend llama-server --port 8000
 ```
 
@@ -70,7 +84,7 @@ rap ui --backend llama-server --port 8000
 
 ```bash
 rap compare --backend mock --iterations 10
-rap compare --backend litellm --model gpt-4o-mini --iterations 10
+rap compare --backend litellm --model openai/gpt-4o-mini --tpm 30000 --iterations 10
 ```
 
 ---
@@ -82,6 +96,8 @@ rap compare --backend litellm --model gpt-4o-mini --iterations 10
 | `--backend` | `mock`, `litellm`, `llama-server` | `mock` | Backend LLM |
 | `--model` | es. `gpt-4o-mini`, `gemini/gemini-2.0-flash` | `None` | Modello per LiteLLM |
 | `--api-base` | URL | `None` | Endpoint API custom |
+| `--tpm` | intero | `None` | Limite massimo **Token al Minuto** (o `RAP_TPM` in `.env`) |
+| `--rpm` | intero | `None` | Limite massimo **Richieste al Minuto** (o `RAP_RPM` in `.env`) |
 | `--mode` | `hybrid`, `paper` | `hybrid` | Modalità di ragionamento |
 | `--iterations` | intero | `10` (`50` su `ui`) | Iterazioni MCTS |
 | `-v`, `--verbose` | flag | `False` | Stampa l'albero MCTS completo |

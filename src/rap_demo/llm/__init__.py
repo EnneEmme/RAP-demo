@@ -11,6 +11,7 @@ from rap_demo.llm.base import (
 from rap_demo.llm.mock import MockLLM, LLMCall
 from rap_demo.llm.llama_client import LlamaServerClient
 from rap_demo.llm.litellm_client import LiteLLMClient
+from rap_demo.llm.rate_limiter import TokenRateLimiter
 from rap_demo.llm.factory import get_llm
 
 __all__ = [
@@ -22,5 +23,6 @@ __all__ = [
     "LLMCall",
     "LlamaServerClient",
     "LiteLLMClient",
+    "TokenRateLimiter",
     "get_llm",
 ]

@@ -5,10 +5,12 @@ from __future__ import annotations
 import math
 import os
 import sys
+import time
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
 from rap_demo.llm.base import BaseLLM, LLMConnectionError, LLMError, LLMTimeoutError
+from rap_demo.llm.rate_limiter import TokenRateLimiter
 
 
 def _load_dotenv_file() -> None:
@@ -90,6 +92,33 @@ def _is_unsupported_param_error(exc: Exception) -> bool:
     return False
 
 
+def _is_rate_limit_error(exc: Exception) -> bool:
+    """Return True when exc is a litellm.RateLimitError."""
+    litellm = sys.modules.get("litellm")
+    if litellm is None:
+        return False
+    rate_limit_cls = getattr(litellm, "RateLimitError", None)
+    return rate_limit_cls is not None and isinstance(exc, rate_limit_cls)
+
+
+def _parse_positive_int_env(var_name: str) -> int | None:
+    """Parse an optional positive integer environment variable."""
+    raw = os.environ.get(var_name)
+    if raw is None or not raw.strip():
+        return None
+    try:
+        value = int(raw.strip())
+    except ValueError as exc:
+        raise ValueError(
+            f"Invalid {var_name}={raw!r}: expected a positive integer."
+        ) from exc
+    if value <= 0:
+        raise ValueError(
+            f"Invalid {var_name}={raw!r}: must be greater than 0."
+        )
+    return value
+
+
 def _map_exception(exc: Exception) -> LLMError:
     """Translate standard library and litellm exceptions into the LLMError hierarchy."""
     if isinstance(exc, LLMError):
@@ -167,6 +196,11 @@ class LiteLLMClient(BaseLLM):
         api_base: str | None = None,
         timeout: float = 30.0,
         completion_fn: Callable[..., Any] | None = None,
+        tokens_per_minute: int | None = None,
+        requests_per_minute: int | None = None,
+        max_retries: int = 3,
+        rate_limiter: TokenRateLimiter | None = None,
+        sleeper: Callable[[float], None] | None = None,
     ) -> None:
         """Initialize LiteLLM client.
 
@@ -176,21 +210,52 @@ class LiteLLMClient(BaseLLM):
             api_base: Optional custom API base URL (e.g. proxy or self-hosted endpoint).
             timeout: Request timeout in seconds.
             completion_fn: Optional completion callable override for dependency injection/testing.
+            tokens_per_minute: Optional TPM rate limit (falls back to RAP_TPM env var).
+            requests_per_minute: Optional RPM rate limit (falls back to RAP_RPM env var).
+            max_retries: Maximum retries on litellm.RateLimitError (default: 3).
+            rate_limiter: Optional preconfigured TokenRateLimiter instance.
+            sleeper: Optional sleep callable used for rate-limit retries and limiter waits.
 
         Raises:
-            ValueError: If model is empty or whitespace-only.
+            ValueError: If model is empty/whitespace-only or rate-limit settings are invalid.
         """
         if not isinstance(model, str) or not model.strip():
             raise ValueError(f"Invalid model identifier: {model!r}. Expected non-empty string.")
+        if max_retries < 0:
+            raise ValueError(f"max_retries must be non-negative, got {max_retries}.")
 
         _load_dotenv_file()
+
+        effective_tpm = (
+            tokens_per_minute
+            if tokens_per_minute is not None
+            else _parse_positive_int_env("RAP_TPM")
+        )
+        effective_rpm = (
+            requests_per_minute
+            if requests_per_minute is not None
+            else _parse_positive_int_env("RAP_RPM")
+        )
 
         self.model: str = model.strip()
         self.api_key: str | None = api_key
         self.api_base: str | None = api_base
         self.timeout: float = timeout
+        self.max_retries: int = max_retries
+        self._sleeper: Callable[[float], None] = sleeper if sleeper is not None else time.sleep
         self._completion_fn: Callable[..., Any] | None = completion_fn
         self._call_count: int = 0
+
+        if rate_limiter is not None:
+            self.rate_limiter: TokenRateLimiter | None = rate_limiter
+        elif effective_tpm is not None or effective_rpm is not None:
+            self.rate_limiter = TokenRateLimiter(
+                tokens_per_minute=effective_tpm,
+                requests_per_minute=effective_rpm,
+                sleeper=sleeper,
+            )
+        else:
+            self.rate_limiter = None
 
     @property
     def call_count(self) -> int:
@@ -223,11 +288,45 @@ class LiteLLMClient(BaseLLM):
         kwargs.update(extra)
         return kwargs
 
+    def _estimate_request_tokens(self, kwargs: Mapping[str, Any]) -> int:
+        """Estimate token usage from completion request messages and max_tokens."""
+        messages = kwargs.get("messages") or []
+        prompt_text = " ".join(
+            str(_get_field(message, "content", "")) for message in messages
+        )
+        max_tokens = int(kwargs.get("max_tokens") or 0)
+        return TokenRateLimiter.estimate_tokens(prompt_text, max_tokens=max_tokens)
+
+    def _record_usage(self, estimated_tokens: int, response: Any) -> None:
+        """Reconcile rate limiter budget using response.usage.total_tokens if present."""
+        if self.rate_limiter is None:
+            return
+        usage = _get_field(response, "usage")
+        total_tokens = _get_field(usage, "total_tokens")
+        if total_tokens is not None:
+            self.rate_limiter.record_actual_tokens(estimated_tokens, int(total_tokens))
+
     def _invoke_completion(self, kwargs: dict[str, Any]) -> Any:
-        """Invoke the configured completion function or litellm.completion and track calls."""
+        """Invoke completion with rate-limiting, retry on RateLimitError, and usage metering."""
         fn = self._completion_fn if self._completion_fn is not None else _load_litellm().completion
-        self._call_count += 1
-        return fn(**kwargs)
+        estimated_tokens = self._estimate_request_tokens(kwargs)
+
+        for attempt in range(self.max_retries + 1):
+            if self.rate_limiter is not None:
+                self.rate_limiter.acquire(estimated_tokens)
+            self._call_count += 1
+            try:
+                response = fn(**kwargs)
+            except Exception as exc:
+                if _is_rate_limit_error(exc) and attempt < self.max_retries:
+                    self._sleeper(0.5 * (2**attempt))
+                    continue
+                raise
+
+            self._record_usage(estimated_tokens, response)
+            return response
+
+        raise LLMError("LiteLLM completion failed after exhausting retries")
 
     def generate(
         self,
