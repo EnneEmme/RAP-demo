@@ -820,3 +820,22 @@ class TestVisualizerWebApp:
         assert data["max_iterations"] == 10
         assert isinstance(data["best_path_ids"], list)
         assert len(data["best_path_ids"]) >= 1
+
+    @pytest.mark.asyncio
+    async def test_step_maps_llm_error_to_502_json_instead_of_500(self) -> None:
+        """POST /api/search/step returns HTTP 502 with detail when step raises LLMError."""
+        from rap_demo.llm.base import LLMError
+
+        class FailingController(SearchController):
+            async def step(self) -> dict[str, Any]:
+                raise LLMError("Malformed LLM response: missing message content")
+
+        app = create_app(FailingController())
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://test",
+        ) as client:
+            response = await client.post("/api/search/step")
+            assert response.status_code == 502
+            assert "Malformed LLM response" in response.json()["detail"]
+

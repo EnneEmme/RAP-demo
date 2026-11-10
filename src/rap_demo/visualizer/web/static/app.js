@@ -284,7 +284,14 @@ class VisualizerApp {
   async postAction(endpoint) {
     try {
       const res = await fetch(endpoint, { method: "POST" });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      if (!res.ok) {
+        let detail = `HTTP ${res.status}`;
+        try {
+          const errJson = await res.json();
+          if (errJson && errJson.detail) detail = errJson.detail;
+        } catch (_) {}
+        throw new Error(detail);
+      }
       const data = await res.json();
 
       if (data.max_iterations !== undefined) {
@@ -306,7 +313,7 @@ class VisualizerApp {
       }
     } catch (err) {
       console.error(`Error calling ${endpoint}:`, err);
-      this.showToast(`Action failed: ${endpoint.split("/").pop()}`);
+      this.showToast(`Action failed (${endpoint.split("/").pop()}): ${err.message}`);
     }
   }
 
@@ -439,6 +446,10 @@ class VisualizerApp {
     }
     if (payload.status) {
       this.updateStatus(payload.status, payload.iteration);
+    }
+
+    if (payload.type === "error" && payload.message) {
+      this.showToast(payload.message);
     }
 
     const isReset = payload.type === "reset";

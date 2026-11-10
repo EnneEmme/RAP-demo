@@ -66,13 +66,39 @@ def _extract_first_choice(response: Any) -> Any:
     return choices[0]
 
 
+def _extract_thinking_blocks_text(message: Any) -> str | None:
+    """Extract concatenated text from LiteLLM/Anthropic/Gemini thinking_blocks if present."""
+    blocks = _get_field(message, "thinking_blocks")
+    if not isinstance(blocks, Sequence) or isinstance(blocks, (str, bytes)):
+        return None
+    parts: list[str] = []
+    for block in blocks:
+        text = _get_field(block, "thinking") or _get_field(block, "text")
+        if text:
+            parts.append(str(text))
+    return "\n".join(parts) if parts else None
+
+
 def _extract_message_content(choice: Any) -> str | None:
-    """Extract choices[0].message.content as string if present and non-None."""
+    """Extract choices[0].message.content, falling back to reasoning_content or thinking_blocks."""
     message = _get_field(choice, "message")
     content = _get_field(message, "content")
-    if content is None:
-        return None
-    return str(content)
+    if content is not None:
+        text = str(content)
+        if text:
+            return text
+
+    reasoning = _get_field(message, "reasoning_content")
+    if reasoning is not None and str(reasoning).strip():
+        return str(reasoning)
+
+    thinking_text = _extract_thinking_blocks_text(message)
+    if thinking_text and thinking_text.strip():
+        return thinking_text
+
+    if content is not None:
+        return str(content)
+    return None
 
 
 def _is_unsupported_param_error(exc: Exception) -> bool:

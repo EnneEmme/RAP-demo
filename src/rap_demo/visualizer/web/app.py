@@ -7,12 +7,13 @@ import json
 from pathlib import Path
 from typing import Any, AsyncGenerator, Optional
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from rap_demo.domains.blocksworld.models import BlockState
+from rap_demo.llm.base import LLMError
 from rap_demo.visualizer.serializer import serialize_blocksworld_state, serialize_tree
 from rap_demo.visualizer.web.controller import SearchController
 
@@ -93,7 +94,10 @@ def create_app(controller: Optional[SearchController] = None) -> FastAPI:
     @server.post("/api/search/step")
     async def post_step() -> dict[str, Any]:
         """Advances search by one iteration."""
-        res = await ctrl.step()
+        try:
+            res = await ctrl.step()
+        except LLMError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
         return {
             "iteration": ctrl.iteration,
             "max_iterations": ctrl.max_iterations,

@@ -176,6 +176,17 @@ class SearchController:
                 await asyncio.sleep(self.step_delay)
         except asyncio.CancelledError:
             pass
+        except Exception as exc:
+            self._status = SearchStatus.PAUSED
+            await self.emit_event(
+                "error",
+                {
+                    "type": "error",
+                    "status": self._status.value,
+                    "iteration": self._iteration,
+                    "message": str(exc),
+                },
+            )
         finally:
             if self._iteration >= self.max_iterations:
                 self._status = SearchStatus.FINISHED

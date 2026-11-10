@@ -66,7 +66,7 @@ class BlocksworldAgent(ReasoningAgent):
     def _get_hybrid_actions(self, state: BlockState) -> list[BlockAction]:
         """Hybrid mode: requests structured JSON with thought, parses action, verifies legality."""
         prompt = build_hybrid_action_prompt(state, self.goal)
-        response = self.llm.generate(prompt, temperature=self.temperature)
+        response = self.llm.generate(prompt, max_tokens=1024, temperature=self.temperature)
 
         payload = _extract_json_payload(response)
         if payload is not None:

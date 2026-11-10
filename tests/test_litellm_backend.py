@@ -1091,3 +1091,65 @@ class TestLiteLLMDotenvLoading:
 
         assert exit_code == 0
 
+
+
+class TestReasoningModelSupport:
+    """Tests reasoning_content/thinking_blocks fallback and sufficient max_tokens for thinking models."""
+
+    def test_generate_falls_back_to_reasoning_content_or_thinking_blocks(self) -> None:
+        """When a reasoning model returns content=None with reasoning_content or thinking_blocks, extract it."""
+        obj_resp = SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(
+                        content=None,
+                        reasoning_content='{"thought": "think", "action": "pick_up", "block": "red", "target": null}',
+                    )
+                )
+            ]
+        )
+        client_reasoning = LiteLLMClient(completion_fn=lambda **_: obj_resp)
+        assert "pick_up" in client_reasoning.generate("prompt")
+
+        blocks_resp = {
+            "choices": [
+                {
+                    "message": {
+                        "content": None,
+                        "thinking_blocks": [
+                            {"type": "thinking", "thinking": "Considering move to pick up red."}
+                        ],
+                    }
+                }
+            ]
+        }
+        client_blocks = LiteLLMClient(completion_fn=lambda **_: blocks_resp)
+        assert client_blocks.generate("prompt") == "Considering move to pick up red."
+
+    def test_blocksworld_hybrid_agent_requests_sufficient_max_tokens_for_reasoning_models(self) -> None:
+        """BlocksworldAgent hybrid mode passes max_tokens >= 512 so thinking models don't truncate before JSON."""
+        from rap_demo.domains.blocksworld.agent import BlocksworldAgent
+        from rap_demo.domains.blocksworld.models import BlockState
+
+        seen_max_tokens: list[int] = []
+
+        def fake_completion(**kwargs: Any) -> SimpleNamespace:
+            seen_max_tokens.append(int(kwargs["max_tokens"]))
+            return _make_obj_response(
+                json.dumps(
+                    {
+                        "thought": "Pick up red",
+                        "action": "pick_up",
+                        "block": "red",
+                        "target": None,
+                    }
+                )
+            )
+
+        client = LiteLLMClient(model="gemini/gemma-4-26b-a4b-it", completion_fn=fake_completion)
+        agent = BlocksworldAgent(llm=client, goal="the red block is on top of the blue block", mode="hybrid")
+        state = BlockState(clear={"red", "blue"}, on_table={"red", "blue"}, on={}, holding=None)
+
+        actions = agent.get_actions(state)
+        assert len(actions) == 1
+        assert seen_max_tokens and seen_max_tokens[0] >= 512
