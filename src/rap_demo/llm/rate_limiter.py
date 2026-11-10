@@ -2,12 +2,158 @@
 
 from __future__ import annotations
 
+import json
 import math
+import os
+import re
 import threading
 import time
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from typing import Any
+
+
+def normalize_model_env_key(model: str) -> str:
+    """Normalize a model identifier into an uppercase env-var suffix."""
+    return re.sub(r"[^A-Za-z0-9]+", "_", model).strip("_").upper()
+
+
+def _parse_positive_int(raw: Any, label: str) -> int | None:
+    """Validate and convert an env-var or JSON value into a positive integer."""
+    if raw is None:
+        return None
+    if isinstance(raw, bool):
+        raise ValueError(f"Invalid {label}={raw!r}: boolean is not a valid positive integer.")
+    if isinstance(raw, int):
+        if raw <= 0:
+            raise ValueError(f"Invalid {label}={raw!r}: must be greater than 0.")
+        return raw
+    if isinstance(raw, str):
+        stripped = raw.strip()
+        if not stripped:
+            return None
+        try:
+            value = int(stripped)
+        except ValueError as exc:
+            raise ValueError(
+                f"Invalid {label}={raw!r}: expected a positive integer."
+            ) from exc
+        if value <= 0:
+            raise ValueError(f"Invalid {label}={raw!r}: must be greater than 0.")
+        return value
+    raise ValueError(f"Invalid {label}={raw!r}: expected a positive integer.")
+
+
+def _lookup_json_model_limits(
+    model: str,
+    env: Mapping[str, str],
+) -> dict[str, Any] | None:
+    """Parse RAP_MODEL_LIMITS JSON and return matching model entry, if any."""
+    raw_json = env.get("RAP_MODEL_LIMITS")
+    if raw_json is None or not raw_json.strip():
+        return None
+
+    try:
+        parsed = json.loads(raw_json)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Invalid RAP_MODEL_LIMITS JSON: {exc}") from exc
+
+    if not isinstance(parsed, dict):
+        raise ValueError("Invalid RAP_MODEL_LIMITS: expected a JSON object mapping model names to limits.")
+
+    short_name = model.rsplit("/", 1)[-1] if "/" in model else None
+    candidates: list[str] = [model]
+    if short_name and short_name != model:
+        candidates.append(short_name)
+
+    matched_entry: Any = None
+    matched_found = False
+
+    for candidate in candidates:
+        if candidate in parsed:
+            matched_entry = parsed[candidate]
+            matched_found = True
+            break
+
+    if not matched_found:
+        lowered = {str(k).lower(): v for k, v in parsed.items()}
+        for candidate in candidates:
+            key_lower = candidate.lower()
+            if key_lower in lowered:
+                matched_entry = lowered[key_lower]
+                matched_found = True
+                break
+
+    if not matched_found:
+        return None
+
+    if not isinstance(matched_entry, dict):
+        raise ValueError(
+            f"Invalid RAP_MODEL_LIMITS entry for {model!r}: expected an object with 'tpm'/'rpm'."
+        )
+    return matched_entry
+
+
+def resolve_model_rate_limits(
+    model: str,
+    tokens_per_minute: int | None = None,
+    requests_per_minute: int | None = None,
+    environ: Mapping[str, str] | None = None,
+) -> tuple[int | None, int | None]:
+    """Resolve effective (tpm, rpm) for a model with per-model env/JSON precedence.
+
+    Precedence independently for TPM and RPM:
+    1. Explicit `tokens_per_minute` / `requests_per_minute` argument
+    2. `RAP_TPM_<FULL_KEY>` / `RAP_RPM_<FULL_KEY>`
+    3. `RAP_TPM_<SHORT_KEY>` / `RAP_RPM_<SHORT_KEY>` (for provider/model names)
+    4. `RAP_MODEL_LIMITS` JSON map entry (`tpm` / `rpm`)
+    5. Global `RAP_TPM` / `RAP_RPM`
+    """
+    env = environ if environ is not None else os.environ
+    full_key = normalize_model_env_key(model)
+    short_name = model.rsplit("/", 1)[-1] if "/" in model else None
+    short_key = normalize_model_env_key(short_name) if short_name else None
+
+    json_entry = (
+        _lookup_json_model_limits(model, env)
+        if (tokens_per_minute is None or requests_per_minute is None)
+        else None
+    )
+
+    def _resolve_single(
+        explicit: int | None,
+        env_prefix: str,
+        json_field: str,
+        global_var: str,
+    ) -> int | None:
+        if explicit is not None:
+            return _parse_positive_int(explicit, global_var)
+
+        full_var = f"{env_prefix}_{full_key}"
+        val = _parse_positive_int(env.get(full_var), full_var)
+        if val is not None:
+            return val
+
+        if short_key and short_key != full_key:
+            short_var = f"{env_prefix}_{short_key}"
+            val = _parse_positive_int(env.get(short_var), short_var)
+            if val is not None:
+                return val
+
+        if json_entry is not None and json_field in json_entry:
+            val = _parse_positive_int(
+                json_entry[json_field],
+                f"RAP_MODEL_LIMITS[{model!r}][{json_field!r}]",
+            )
+            if val is not None:
+                return val
+
+        return _parse_positive_int(env.get(global_var), global_var)
+
+    resolved_tpm = _resolve_single(tokens_per_minute, "RAP_TPM", "tpm", "RAP_TPM")
+    resolved_rpm = _resolve_single(requests_per_minute, "RAP_RPM", "rpm", "RAP_RPM")
+    return resolved_tpm, resolved_rpm
 
 
 @dataclass

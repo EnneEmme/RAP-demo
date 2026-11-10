@@ -10,7 +10,7 @@ from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
 from rap_demo.llm.base import BaseLLM, LLMConnectionError, LLMError, LLMTimeoutError
-from rap_demo.llm.rate_limiter import TokenRateLimiter
+from rap_demo.llm.rate_limiter import TokenRateLimiter, resolve_model_rate_limits
 
 
 def _load_dotenv_file() -> None:
@@ -99,24 +99,6 @@ def _is_rate_limit_error(exc: Exception) -> bool:
         return False
     rate_limit_cls = getattr(litellm, "RateLimitError", None)
     return rate_limit_cls is not None and isinstance(exc, rate_limit_cls)
-
-
-def _parse_positive_int_env(var_name: str) -> int | None:
-    """Parse an optional positive integer environment variable."""
-    raw = os.environ.get(var_name)
-    if raw is None or not raw.strip():
-        return None
-    try:
-        value = int(raw.strip())
-    except ValueError as exc:
-        raise ValueError(
-            f"Invalid {var_name}={raw!r}: expected a positive integer."
-        ) from exc
-    if value <= 0:
-        raise ValueError(
-            f"Invalid {var_name}={raw!r}: must be greater than 0."
-        )
-    return value
 
 
 def _map_exception(exc: Exception) -> LLMError:
@@ -226,18 +208,13 @@ class LiteLLMClient(BaseLLM):
 
         _load_dotenv_file()
 
-        effective_tpm = (
-            tokens_per_minute
-            if tokens_per_minute is not None
-            else _parse_positive_int_env("RAP_TPM")
-        )
-        effective_rpm = (
-            requests_per_minute
-            if requests_per_minute is not None
-            else _parse_positive_int_env("RAP_RPM")
+        self.model: str = model.strip()
+        effective_tpm, effective_rpm = resolve_model_rate_limits(
+            self.model,
+            tokens_per_minute=tokens_per_minute,
+            requests_per_minute=requests_per_minute,
         )
 
-        self.model: str = model.strip()
         self.api_key: str | None = api_key
         self.api_base: str | None = api_base
         self.timeout: float = timeout

@@ -7,16 +7,15 @@ Implementazione di **Reasoning via Planning (RAP)** con **MCTS** su Blocksworld,
 ## Setup
 
 ```bash
-uv venv
+uv sync
 source .venv/bin/activate
-uv pip install -e ".[dev]"
 ```
 
-*(Su Python 3.15, se necessario per compilare `fastuuid`: `PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1 uv pip install -e ".[dev]"`)*
+*(Su Python 3.15, se necessario per compilare `fastuuid`: `PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1 uv sync`)*
 
 ---
 
-## Configurazione `.env` (API Esterne & Limiti)
+## Configurazione `.env` (API Esterne & Limiti per Modello)
 
 Per usare API esterne con `--backend litellm`, copia `.env.example` in `.env` e inserisci la tua API key:
 
@@ -25,17 +24,25 @@ cp .env.example .env
 ```
 
 ```env
-OPENAI_API_KEY=sk-...
+GEMINI_API_KEY=AIza...
+# OPENAI_API_KEY=sk-...
 # ANTHROPIC_API_KEY=sk-ant-...
-# GEMINI_API_KEY=...
-# GROQ_API_KEY=...
 
-# Limiti opzionali (Token/Richieste al minuto)
+# Limiti opzionali per singolo modello (priorità rispetto a RAP_TPM / RAP_RPM globali)
+RAP_TPM_GEMINI_GEMMA_4_31B_IT=15000
+RAP_RPM_GEMINI_GEMMA_4_31B_IT=30
+RAP_TPM_GEMINI_GEMMA_4_26B_A4B_IT=15000
+RAP_RPM_GEMINI_GEMMA_4_26B_A4B_IT=30
+
+# Oppure in formato JSON compatto:
+# RAP_MODEL_LIMITS={"gemini/gemma-4-31b-it":{"tpm":15000,"rpm":30},"openai/gpt-4o-mini":{"tpm":200000,"rpm":500}}
+
+# Fallback globale (se il modello non ha limiti dedicati)
 # RAP_TPM=30000
 # RAP_RPM=60
 ```
 
-Il file `.env` viene caricato automaticamente all'avvio.
+Il file `.env` viene caricato automaticamente all'avvio. I flag `--tpm` / `--rpm` da terminale sovrascrivono i valori del `.env`.
 
 ---
 

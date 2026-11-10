@@ -15,12 +15,16 @@ Tests cover contracts BEFORE production implementation:
 3. CLI integration (rap_demo.cli):
    - --tpm and --rpm flags (int, default None) on run, ui, and compare subcommands.
    - _create_llm('litellm', model=..., tpm=..., rpm=...) wiring and backward compatibility.
+4. Per-model rate-limit resolution:
+   - normalize_model_env_key() and resolve_model_rate_limits() precedence and validation.
+   - Per-model .env limits (RAP_TPM_<MODEL>, RAP_RPM_<MODEL>, RAP_MODEL_LIMITS) in LiteLLMClient and CLI override.
 """
 
 from __future__ import annotations
 
 import json
 import math
+import os
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -32,7 +36,11 @@ from rap_demo.cli import _create_llm, build_parser, main
 from rap_demo.llm.base import LLMError
 from rap_demo.llm.litellm_client import LiteLLMClient
 from rap_demo.llm.mock import MockLLM
-from rap_demo.llm.rate_limiter import TokenRateLimiter
+from rap_demo.llm.rate_limiter import (
+    TokenRateLimiter,
+    normalize_model_env_key,
+    resolve_model_rate_limits,
+)
 
 
 # ============================================================================
@@ -299,10 +307,32 @@ class TestLiteLLMClientRateLimitingAndRetries:
     """Tests LiteLLMClient rate limiting, RAP_TPM/RAP_RPM env config, usage tracking, and retries."""
 
     @pytest.fixture(autouse=True)
-    def _clean_rate_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        for var in ("RAP_TPM", "RAP_RPM"):
+    def _clean_rate_env(self, monkeypatch: pytest.MonkeyPatch) -> Any:
+        known_vars = [
+            "RAP_TPM",
+            "RAP_RPM",
+            "RAP_MODEL_LIMITS",
+            "RAP_TPM_GEMINI_GEMMA_4_31B_IT",
+            "RAP_RPM_GEMINI_GEMMA_4_31B_IT",
+            "RAP_TPM_GEMMA_4_31B_IT",
+            "RAP_RPM_GEMMA_4_31B_IT",
+            "RAP_TPM_OPENAI_GPT_4O_MINI",
+            "RAP_RPM_OPENAI_GPT_4O_MINI",
+            "RAP_TPM_GPT_4O_MINI",
+            "RAP_RPM_GPT_4O_MINI",
+        ]
+        existing_dynamic = [
+            k
+            for k in list(os.environ)
+            if k.startswith(("RAP_TPM", "RAP_RPM")) or k == "RAP_MODEL_LIMITS"
+        ]
+        for var in set(known_vars + existing_dynamic):
             monkeypatch.setenv(var, "")
             monkeypatch.delenv(var, raising=False)
+        yield
+        for k in list(os.environ):
+            if k.startswith(("RAP_TPM", "RAP_RPM")) or k == "RAP_MODEL_LIMITS":
+                monkeypatch.delenv(k, raising=False)
 
     def test_client_accepts_rate_limiter_parameters(self) -> None:
         """LiteLLMClient accepts TPM, RPM, max_retries, rate_limiter, and sleeper."""
@@ -615,3 +645,278 @@ class TestRateLimiterCLIIntegration:
             )
 
         assert exit_code == 0
+
+
+# ============================================================================
+# 4. Per-Model Rate-Limit Configuration Tests
+# ============================================================================
+
+
+class TestPerModelRateLimitResolution:
+    """Tests normalize_model_env_key() and resolve_model_rate_limits() precedence & validation."""
+
+    @pytest.mark.parametrize(
+        ("model", "expected"),
+        [
+            ("gemini/gemma-4-31b-it", "GEMINI_GEMMA_4_31B_IT"),
+            ("openai/gpt-4o-mini", "OPENAI_GPT_4O_MINI"),
+            ("anthropic/claude-3.5-sonnet:latest", "ANTHROPIC_CLAUDE_3_5_SONNET_LATEST"),
+            ("  /my--model:v1.2/ ", "MY_MODEL_V1_2"),
+            ("gpt-4o", "GPT_4O"),
+        ],
+    )
+    def test_normalize_model_env_key(self, model: str, expected: str) -> None:
+        """normalize_model_env_key uppercases and collapses non-alphanumeric runs to '_'."""
+        assert normalize_model_env_key(model) == expected
+
+    def test_resolve_precedence_order_full(self) -> None:
+        """Verifies full precedence: explicit arg > full env > short env > RAP_MODEL_LIMITS > global."""
+        model = "gemini/gemma-4-31b-it"
+        all_env = {
+            "RAP_TPM": "1000",
+            "RAP_RPM": "10",
+            "RAP_MODEL_LIMITS": json.dumps(
+                {
+                    "gemini/gemma-4-31b-it": {"tpm": 2000, "rpm": 20},
+                }
+            ),
+            "RAP_TPM_GEMMA_4_31B_IT": "3000",
+            "RAP_RPM_GEMMA_4_31B_IT": "30",
+            "RAP_TPM_GEMINI_GEMMA_4_31B_IT": "4000",
+            "RAP_RPM_GEMINI_GEMMA_4_31B_IT": "40",
+        }
+
+        # 1. Explicit args beat everything
+        assert resolve_model_rate_limits(
+            model, tokens_per_minute=9000, requests_per_minute=90, environ=all_env
+        ) == (9000, 90)
+
+        # 2. Full per-model env var beats short, JSON, and global
+        assert resolve_model_rate_limits(model, environ=all_env) == (4000, 40)
+
+        # 3. Short per-model env var beats JSON and global
+        no_full = {
+            k: v
+            for k, v in all_env.items()
+            if k not in ("RAP_TPM_GEMINI_GEMMA_4_31B_IT", "RAP_RPM_GEMINI_GEMMA_4_31B_IT")
+        }
+        assert resolve_model_rate_limits(model, environ=no_full) == (3000, 30)
+
+        # 4. RAP_MODEL_LIMITS beats global
+        no_per_model_vars = {
+            "RAP_TPM": "1000",
+            "RAP_RPM": "10",
+            "RAP_MODEL_LIMITS": all_env["RAP_MODEL_LIMITS"],
+        }
+        assert resolve_model_rate_limits(model, environ=no_per_model_vars) == (2000, 20)
+
+        # 5. Global fallback when no per-model limits match
+        global_only = {"RAP_TPM": "1000", "RAP_RPM": "10"}
+        assert resolve_model_rate_limits(model, environ=global_only) == (1000, 10)
+
+        # 6. Nothing set -> (None, None)
+        assert resolve_model_rate_limits(model, environ={}) == (None, None)
+
+    def test_resolve_rap_model_limits_short_name_and_case_insensitive_matching(self) -> None:
+        """RAP_MODEL_LIMITS matches exact key, then short name, then case-insensitive match."""
+        # Short name fallback when provider-prefixed key is absent
+        env_short = {
+            "RAP_MODEL_LIMITS": json.dumps({"gemma-4-31b-it": {"tpm": 16000, "rpm": 25}})
+        }
+        assert resolve_model_rate_limits("gemini/gemma-4-31b-it", environ=env_short) == (
+            16000,
+            25,
+        )
+
+        # Case-insensitive fallback
+        env_case = {
+            "RAP_MODEL_LIMITS": json.dumps(
+                {"GEMINI/GEMMA-4-31B-IT": {"tpm": 14000, "rpm": 20}}
+            )
+        }
+        assert resolve_model_rate_limits("gemini/gemma-4-31b-it", environ=env_case) == (
+            14000,
+            20,
+        )
+
+    def test_resolve_partial_overrides_mix_sources_independently(self) -> None:
+        """TPM and RPM resolve independently across explicit, per-model, JSON, and global sources."""
+        env = {
+            "RAP_TPM_GEMINI_GEMMA_4_31B_IT": "15000",
+            "RAP_RPM": "60",
+        }
+        assert resolve_model_rate_limits("gemini/gemma-4-31b-it", environ=env) == (15000, 60)
+
+        env_json = {
+            "RAP_MODEL_LIMITS": json.dumps(
+                {"gemini/gemma-4-31b-it": {"tpm": 15000, "rpm": 30}}
+            )
+        }
+        assert resolve_model_rate_limits(
+            "gemini/gemma-4-31b-it", requests_per_minute=12, environ=env_json
+        ) == (15000, 12)
+
+    @pytest.mark.parametrize(
+        "bad_env",
+        [
+            {"RAP_MODEL_LIMITS": "{not valid json"},
+            {"RAP_MODEL_LIMITS": "[1, 2, 3]"},
+            {"RAP_MODEL_LIMITS": json.dumps({"gemini/gemma-4-31b-it": 15000})},
+            {"RAP_MODEL_LIMITS": json.dumps({"gemini/gemma-4-31b-it": {"tpm": 0}})},
+            {"RAP_MODEL_LIMITS": json.dumps({"gemini/gemma-4-31b-it": {"rpm": -5}})},
+            {"RAP_MODEL_LIMITS": json.dumps({"gemini/gemma-4-31b-it": {"tpm": "fast"}})},
+            {"RAP_MODEL_LIMITS": json.dumps({"gemini/gemma-4-31b-it": {"tpm": True}})},
+            {"RAP_TPM_GEMINI_GEMMA_4_31B_IT": "0"},
+            {"RAP_TPM_GEMINI_GEMMA_4_31B_IT": "-10"},
+            {"RAP_RPM_GEMMA_4_31B_IT": "abc"},
+            {"RAP_RPM_GEMINI_GEMMA_4_31B_IT": "12.5"},
+        ],
+    )
+    def test_resolve_invalid_per_model_config_raises_value_error(
+        self, bad_env: dict[str, str]
+    ) -> None:
+        """Invalid JSON, wrong types, or non-positive limits raise ValueError."""
+        with pytest.raises(ValueError):
+            resolve_model_rate_limits("gemini/gemma-4-31b-it", environ=bad_env)
+
+
+class TestPerModelLiteLLMAndCLIIntegration:
+    """Tests per-model .env limits with LiteLLMClient and CLI overrides."""
+
+    @pytest.fixture(autouse=True)
+    def _clean_rate_env(self, monkeypatch: pytest.MonkeyPatch) -> Any:
+        known_vars = [
+            "RAP_TPM",
+            "RAP_RPM",
+            "RAP_MODEL_LIMITS",
+            "RAP_TPM_GEMINI_GEMMA_4_31B_IT",
+            "RAP_RPM_GEMINI_GEMMA_4_31B_IT",
+            "RAP_TPM_GEMMA_4_31B_IT",
+            "RAP_RPM_GEMMA_4_31B_IT",
+            "RAP_TPM_OPENAI_GPT_4O_MINI",
+            "RAP_RPM_OPENAI_GPT_4O_MINI",
+        ]
+        for var in known_vars:
+            monkeypatch.setenv(var, "")
+            monkeypatch.delenv(var, raising=False)
+        yield
+        for k in list(os.environ):
+            if k.startswith(("RAP_TPM", "RAP_RPM")) or k == "RAP_MODEL_LIMITS":
+                monkeypatch.delenv(k, raising=False)
+
+    def test_litellm_client_loads_per_model_limits_from_dotenv(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Per-model RAP_TPM_* / RAP_RPM_* in .env configure each model's rate_limiter."""
+        (tmp_path / ".env").write_text(
+            "\n".join(
+                [
+                    "RAP_TPM_GEMINI_GEMMA_4_31B_IT=15000",
+                    "RAP_RPM_GEMINI_GEMMA_4_31B_IT=30",
+                    "RAP_TPM_OPENAI_GPT_4O_MINI=200000",
+                    "RAP_RPM_OPENAI_GPT_4O_MINI=500",
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        monkeypatch.chdir(tmp_path)
+
+        gemma_client = LiteLLMClient(model="gemini/gemma-4-31b-it")
+        assert gemma_client.rate_limiter is not None
+        assert gemma_client.rate_limiter.tokens_per_minute == 15_000
+        assert gemma_client.rate_limiter.requests_per_minute == 30
+
+        gpt_client = LiteLLMClient(model="openai/gpt-4o-mini")
+        assert gpt_client.rate_limiter is not None
+        assert gpt_client.rate_limiter.tokens_per_minute == 200_000
+        assert gpt_client.rate_limiter.requests_per_minute == 500
+
+    def test_litellm_client_loads_rap_model_limits_json_from_dotenv(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """RAP_MODEL_LIMITS JSON in .env configures per-model rate_limiter in LiteLLMClient."""
+        limits_json = json.dumps(
+            {
+                "gemini/gemma-4-31b-it": {"tpm": 15000, "rpm": 30},
+                "openai/gpt-4o-mini": {"tpm": 200000, "rpm": 500},
+            }
+        )
+        (tmp_path / ".env").write_text(f"RAP_MODEL_LIMITS={limits_json}\n", encoding="utf-8")
+        monkeypatch.chdir(tmp_path)
+
+        gemma_client = LiteLLMClient(model="gemini/gemma-4-31b-it")
+        assert gemma_client.rate_limiter is not None
+        assert gemma_client.rate_limiter.tokens_per_minute == 15_000
+        assert gemma_client.rate_limiter.requests_per_minute == 30
+
+    def test_cli_tpm_and_rpm_flags_override_per_model_dotenv_limits(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Explicit --tpm / --rpm flags on CLI override per-model .env limits."""
+        litellm = _import_litellm()
+        (tmp_path / ".env").write_text(
+            "RAP_TPM_GEMINI_GEMMA_4_31B_IT=15000\nRAP_RPM_GEMINI_GEMMA_4_31B_IT=30\n",
+            encoding="utf-8",
+        )
+        monkeypatch.chdir(tmp_path)
+
+        # Direct _create_llm check
+        llm = _create_llm("litellm", model="gemini/gemma-4-31b-it", tpm=5000, rpm=10)
+        assert isinstance(llm, LiteLLMClient)
+        assert llm.rate_limiter is not None
+        assert llm.rate_limiter.tokens_per_minute == 5000
+        assert llm.rate_limiter.requests_per_minute == 10
+
+        # End-to-end CLI `main(["run", ...])` verification
+        created_clients: list[LiteLLMClient] = []
+        orig_create_llm = _create_llm
+
+        def spy_create_llm(*args: Any, **kwargs: Any) -> Any:
+            client = orig_create_llm(*args, **kwargs)
+            created_clients.append(client)
+            return client
+
+        def fake_completion(**kwargs: Any) -> SimpleNamespace:
+            if kwargs.get("logprobs") or kwargs.get("max_tokens") == 1:
+                return _make_obj_response("Yes", total_tokens=5)
+            return _make_obj_response(
+                json.dumps(
+                    {
+                        "thought": "Pick up red",
+                        "action": "pick_up",
+                        "block": "red",
+                        "target": None,
+                    }
+                ),
+                total_tokens=20,
+            )
+
+        with (
+            patch("rap_demo.cli._create_llm", side_effect=spy_create_llm),
+            patch.object(litellm, "completion", side_effect=fake_completion),
+        ):
+            rc = main(
+                [
+                    "run",
+                    "--backend",
+                    "litellm",
+                    "--model",
+                    "gemini/gemma-4-31b-it",
+                    "--tpm",
+                    "5000",
+                    "--rpm",
+                    "10",
+                    "--iterations",
+                    "1",
+                    "--no-save",
+                ]
+            )
+
+        assert rc == 0
+        assert len(created_clients) == 1
+        cli_limiter = created_clients[0].rate_limiter
+        assert cli_limiter is not None
+        assert cli_limiter.tokens_per_minute == 5000
+        assert cli_limiter.requests_per_minute == 10
+
