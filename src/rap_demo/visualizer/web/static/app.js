@@ -17,6 +17,9 @@ class VisualizerApp {
     this.autoFollow = true;
     this.inspectorMode = "overview";
     this.isStepping = false;
+    this.stepStartTime = 0;
+    this.stepTicker = null;
+    this.syncTimer = null;
     this.eventSource = null;
 
     // Pan & Zoom state
@@ -331,13 +334,53 @@ class VisualizerApp {
   }
 
   setStepPending(pending) {
+    if (this.stepTicker) {
+      clearInterval(this.stepTicker);
+      this.stepTicker = null;
+    }
     if (this.btnStep) {
       this.btnStep.disabled = pending;
       const label = this.btnStep.querySelector("span");
-      if (label) label.textContent = pending ? "Stepping..." : "Step";
+      if (label) {
+        if (pending) {
+          this.stepStartTime = Date.now();
+          label.textContent = "Stepping...";
+          this.stepTicker = setInterval(() => {
+            const secs = Math.floor((Date.now() - this.stepStartTime) / 1000);
+            if (secs >= 1) label.textContent = `Stepping (${secs}s)...`;
+          }, 1000);
+        } else {
+          label.textContent = "Step";
+        }
+      }
     }
     if (this.btnPlay && pending) {
       this.btnPlay.disabled = true;
+    }
+    this.updateActiveSyncPolling();
+  }
+
+  updateActiveSyncPolling() {
+    const needsPoll = this.isStepping || this.status === "running";
+    if (needsPoll && !this.syncTimer) {
+      this.syncTimer = setInterval(() => this.pollLatestState(), 1200);
+    } else if (!needsPoll && this.syncTimer) {
+      clearInterval(this.syncTimer);
+      this.syncTimer = null;
+    }
+  }
+
+  async pollLatestState() {
+    try {
+      const res = await fetch("/api/meta");
+      if (!res.ok) return;
+      const meta = await res.json();
+      if (meta.iteration !== this.iteration || (meta.status && meta.status.toLowerCase() !== this.status)) {
+        this.applyMeta(meta);
+        await this.fetchTreeAndState();
+      }
+    } catch (_) {
+      // Ignore transient poll errors while request is in flight
     }
   }
 
@@ -541,6 +584,7 @@ class VisualizerApp {
     if (this.btnPlayLabel) {
       this.btnPlayLabel.textContent = this.status === "paused" ? "Resume" : "Play";
     }
+    this.updateActiveSyncPolling();
   }
 
   computeBestPathFallback(root) {
