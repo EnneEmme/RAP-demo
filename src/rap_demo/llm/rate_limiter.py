@@ -11,7 +11,10 @@ import time
 from collections import deque
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
+
+from rap_demo.config.models import load_models_config
 
 
 def normalize_model_env_key(model: str) -> str:
@@ -100,31 +103,32 @@ def resolve_model_rate_limits(
     tokens_per_minute: int | None = None,
     requests_per_minute: int | None = None,
     environ: Mapping[str, str] | None = None,
+    config_path: str | Path | None = None,
 ) -> tuple[int | None, int | None]:
-    """Resolve effective (tpm, rpm) for a model with per-model env/JSON precedence.
+    """Resolve effective (tpm, rpm) for a model with per-model env/JSON/config precedence.
 
     Precedence independently for TPM and RPM:
     1. Explicit `tokens_per_minute` / `requests_per_minute` argument
     2. `RAP_TPM_<FULL_KEY>` / `RAP_RPM_<FULL_KEY>`
     3. `RAP_TPM_<SHORT_KEY>` / `RAP_RPM_<SHORT_KEY>` (for provider/model names)
     4. `RAP_MODEL_LIMITS` JSON map entry (`tpm` / `rpm`)
-    5. Global `RAP_TPM` / `RAP_RPM`
+    5. `models.json` profile (`tpm` / `rpm`)
+    6. Global `RAP_TPM` / `RAP_RPM`
     """
     env = environ if environ is not None else os.environ
     full_key = normalize_model_env_key(model)
     short_name = model.rsplit("/", 1)[-1] if "/" in model else None
     short_key = normalize_model_env_key(short_name) if short_name else None
 
-    json_entry = (
-        _lookup_json_model_limits(model, env)
-        if (tokens_per_minute is None or requests_per_minute is None)
-        else None
-    )
+    needs_env_lookup = tokens_per_minute is None or requests_per_minute is None
+    json_entry = _lookup_json_model_limits(model, env) if needs_env_lookup else None
+    profile = load_models_config(config_path).resolve_model(model) if needs_env_lookup else None
 
     def _resolve_single(
         explicit: int | None,
         env_prefix: str,
         json_field: str,
+        profile_attr: str,
         global_var: str,
     ) -> int | None:
         if explicit is not None:
@@ -149,10 +153,15 @@ def resolve_model_rate_limits(
             if val is not None:
                 return val
 
+        if profile is not None:
+            profile_val = getattr(profile, profile_attr, None)
+            if profile_val is not None:
+                return int(profile_val)
+
         return _parse_positive_int(env.get(global_var), global_var)
 
-    resolved_tpm = _resolve_single(tokens_per_minute, "RAP_TPM", "tpm", "RAP_TPM")
-    resolved_rpm = _resolve_single(requests_per_minute, "RAP_RPM", "rpm", "RAP_RPM")
+    resolved_tpm = _resolve_single(tokens_per_minute, "RAP_TPM", "tpm", "tpm", "RAP_TPM")
+    resolved_rpm = _resolve_single(requests_per_minute, "RAP_RPM", "rpm", "rpm", "RAP_RPM")
     return resolved_tpm, resolved_rpm
 
 

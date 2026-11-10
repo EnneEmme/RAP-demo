@@ -1,6 +1,6 @@
 # RAP Demo
 
-Implementazione di **Reasoning via Planning (RAP)** con **MCTS** su Blocksworld, supporto **Hybrid / Paper mode**, modelli locali (`llama.cpp`), API esterne (`litellm`) con vincoli TPM/RPM e dashboard Web in tempo reale.
+Implementazione di **Reasoning via Planning (RAP)** con **MCTS** su Blocksworld, supporto **Hybrid / Paper mode**, modelli locali (`llama.cpp`), API esterne (`litellm`) con vincoli TPM/RPM per modello, salvataggio/replay cache delle run e dashboard Web in tempo reale.
 
 ---
 
@@ -15,34 +15,23 @@ source .venv/bin/activate
 
 ---
 
-## Configurazione `.env` (API Esterne & Limiti per Modello)
+## Configurazione: `.env` (API Key) + `models.json` (Modelli & Limiti)
 
-Per usare API esterne con `--backend litellm`, copia `.env.example` in `.env` e inserisci la tua API key:
+- **`.env`** contiene solo i token API:
+  ```bash
+  cp .env.example .env
+  ```
+  ```env
+  GEMINI_API_KEY=AIza...
+  # OPENAI_API_KEY=sk-...
+  # ANTHROPIC_API_KEY=sk-ant-...
+  ```
 
-```bash
-cp .env.example .env
-```
-
-```env
-GEMINI_API_KEY=AIza...
-# OPENAI_API_KEY=sk-...
-# ANTHROPIC_API_KEY=sk-ant-...
-
-# Limiti opzionali per singolo modello (priorità rispetto a RAP_TPM / RAP_RPM globali)
-RAP_TPM_GEMINI_GEMMA_4_31B_IT=15000
-RAP_RPM_GEMINI_GEMMA_4_31B_IT=30
-RAP_TPM_GEMINI_GEMMA_4_26B_A4B_IT=15000
-RAP_RPM_GEMINI_GEMMA_4_26B_A4B_IT=30
-
-# Oppure in formato JSON compatto:
-# RAP_MODEL_LIMITS={"gemini/gemma-4-31b-it":{"tpm":15000,"rpm":30},"openai/gpt-4o-mini":{"tpm":200000,"rpm":500}}
-
-# Fallback globale (se il modello non ha limiti dedicati)
-# RAP_TPM=30000
-# RAP_RPM=60
-```
-
-Il file `.env` viene caricato automaticamente all'avvio. I flag `--tpm` / `--rpm` da terminale sovrascrivono i valori del `.env`.
+- **`models.json`** contiene i profili dei modelli, backend, `api_base`, timeout e limiti **`tpm` / `rpm`** per singolo modello (`gemma4-26b`, `gemma4-31b`, `gpt-4o-mini`, `local-llama`, ecc.).
+  ```bash
+  # Elenca i modelli configurati in models.json
+  rap models
+  ```
 
 ---
 
@@ -52,12 +41,11 @@ Il file `.env` viene caricato automaticamente all'avvio. I flag `--tpm` / `--rpm
    ```bash
    brew install llama.cpp
    ```
-2. **Avvia il server locale** in un terminale dedicato scaricando automaticamente un modello GGUF da Hugging Face (`-hf`) con GPU Metal (`-ngl 99`):
+2. **Avvia il server locale** scaricando un GGUF da Hugging Face (`-hf`) con GPU Metal (`-ngl 99`):
    ```bash
    llama-server -hf saidutta69/LFM3-VL-2B-heretic --port 8080 -ngl 99
    ```
-   *(Puoi sostituire il repo con qualsiasi modello GGUF, es. `LiquidAI/LFM3-1.7B-GGUF`.)*
-3. Lascia aperto quel terminale e usa `--backend llama-server` nei comandi `rap` qui sotto.
+3. In un altro terminale usa `--model local-llama` (configurato in `models.json`) oppure `--backend llama-server`.
 
 ---
 
@@ -69,44 +57,47 @@ Il file `.env` viene caricato automaticamente all'avvio. I flag `--tpm` / `--rpm
 # Mock offline (nessun modello richiesto)
 rap run --iterations 10 -v
 
-# API esterne via LiteLLM + vincoli token/minuto
-rap run --backend litellm --model openai/gpt-4o-mini --tpm 30000 --rpm 60 --iterations 10 -v
-rap run --backend litellm --model anthropic/claude-3-5-sonnet-20241022 --iterations 10 -v
+# Usando un alias definito in models.json (risolve automaticamente backend, model, tpm, rpm)
+rap run --model gemma4-26b -v
+rap run --model gemma4-31b -v
 
-# Modello locale via llama-server (avviato sopra)
-rap run --backend llama-server --iterations 10 -v
+# Modello ad-hoc non presente in models.json
+rap run --backend litellm --model openai/gpt-4o-mini --tpm 30000 --rpm 60 -v
+
+# Modello locale llama.cpp
+rap run --model local-llama -v
 ```
 
 ### 2. Dashboard Web (`rap ui`)
 
-Il modello e il backend si scelgono **direttamente dal comando nel terminale** (nessun selettore nella UI web). Avvia il comando e apri `http://127.0.0.1:8000`:
+Il modello si sceglie **solo dal comando nel terminale** (nessun selettore nella pagina web). Avvia e apri `http://127.0.0.1:8000`:
 
 ```bash
 rap ui --backend mock
-rap ui --backend litellm --model openai/gpt-4o-mini --tpm 30000 --port 8000
-rap ui --backend llama-server --port 8000
+rap ui --model gemma4-26b --port 8000
+rap ui --model local-llama --port 8000
 ```
 
 ### 3. Confronto Hybrid vs Paper (`rap compare`)
 
 ```bash
 rap compare --backend mock --iterations 10
-rap compare --backend litellm --model openai/gpt-4o-mini --tpm 30000 --iterations 10
+rap compare --model gemma4-26b --iterations 10
 ```
 
 ### 4. Cache & Replay delle Run (`rap history` / `rap replay`)
 
-Ogni esecuzione (`rap run` e `rap ui` al termine) salva automaticamente un file JSON in `runs/` con **data, modello, backend, iterazioni, metriche e albero MCTS completo** (usa `--no-save` per disabilitare). Puoi rivedere i risultati salvati senza consumare token API:
+Ogni esecuzione (`rap run` e `rap ui` al completamento) salva automaticamente un JSON in `runs/` con data, modello, iterazioni e albero MCTS completo (`--no-save` per disabilitare):
 
 ```bash
 # Elenca le run salvate
 rap history
 
-# Rivedi l'ultima run (o l'indice #1, #2...) da terminale
+# Rivedi una run salvata da terminale (zero chiamate API)
 rap replay latest -v
 rap replay 1 -v
 
-# Riapri una run salvata nella Web UI (zero chiamate LLM)
+# Riaprila nella Web UI (zero chiamate API)
 rap replay latest --ui --port 8000
 ```
 
@@ -116,11 +107,11 @@ rap replay latest --ui --port 8000
 
 | Flag | Valori | Default | Descrizione |
 | :--- | :--- | :--- | :--- |
-| `--backend` | `mock`, `litellm`, `llama-server` | `mock` | Backend LLM |
-| `--model` | es. `gpt-4o-mini`, `gemini/gemini-2.0-flash` | `None` | Modello per LiteLLM |
+| `--model` | alias in `models.json` o ID modello | `None` | Seleziona modello (risolve anche backend/limiti da `models.json`) |
+| `--config` | percorso `.json` | `models.json` | File JSON custom dei modelli e limiti |
+| `--backend` | `mock`, `litellm`, `llama-server` | `mock` | Override esplicito del backend |
 | `--api-base` | URL | `None` | Endpoint API custom |
-| `--tpm` | intero | `None` | Limite massimo **Token al Minuto** (o `RAP_TPM` in `.env`) |
-| `--rpm` | intero | `None` | Limite massimo **Richieste al Minuto** (o `RAP_RPM` in `.env`) |
+| `--tpm` / `--rpm` | intero | da `models.json` | Override limiti **Token/Richieste al Minuto** |
 | `--mode` | `hybrid`, `paper` | `hybrid` | Modalità di ragionamento |
 | `--iterations` | intero | `10` (`50` su `ui`) | Iterazioni MCTS |
 | `-v`, `--verbose` | flag | `False` | Stampa l'albero MCTS completo |

@@ -7,6 +7,7 @@ import os
 import sys
 import time
 from collections.abc import Callable, Mapping, Sequence
+from pathlib import Path
 from typing import Any
 
 from rap_demo.llm.base import BaseLLM, LLMConnectionError, LLMError, LLMTimeoutError
@@ -183,6 +184,7 @@ class LiteLLMClient(BaseLLM):
         max_retries: int = 3,
         rate_limiter: TokenRateLimiter | None = None,
         sleeper: Callable[[float], None] | None = None,
+        config_path: str | Path | None = None,
     ) -> None:
         """Initialize LiteLLM client.
 
@@ -192,11 +194,12 @@ class LiteLLMClient(BaseLLM):
             api_base: Optional custom API base URL (e.g. proxy or self-hosted endpoint).
             timeout: Request timeout in seconds.
             completion_fn: Optional completion callable override for dependency injection/testing.
-            tokens_per_minute: Optional TPM rate limit (falls back to RAP_TPM env var).
-            requests_per_minute: Optional RPM rate limit (falls back to RAP_RPM env var).
+            tokens_per_minute: Optional TPM rate limit (falls back to env / models.json).
+            requests_per_minute: Optional RPM rate limit (falls back to env / models.json).
             max_retries: Maximum retries on litellm.RateLimitError (default: 3).
             rate_limiter: Optional preconfigured TokenRateLimiter instance.
             sleeper: Optional sleep callable used for rate-limit retries and limiter waits.
+            config_path: Optional path to models.json configuration file.
 
         Raises:
             ValueError: If model is empty/whitespace-only or rate-limit settings are invalid.
@@ -213,6 +216,7 @@ class LiteLLMClient(BaseLLM):
             self.model,
             tokens_per_minute=tokens_per_minute,
             requests_per_minute=requests_per_minute,
+            config_path=config_path,
         )
 
         self.api_key: str | None = api_key

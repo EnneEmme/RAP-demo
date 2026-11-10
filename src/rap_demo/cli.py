@@ -13,10 +13,12 @@ import json
 import re
 import sys
 import time
+from pathlib import Path
 from typing import Any, Sequence
 from rich.console import Console
 from rich.table import Table
 
+from rap_demo.config import ModelsConfig, load_models_config
 from rap_demo.core.mcts import MCTS, extract_best_trajectory
 from rap_demo.core.node import MCTSNode
 from rap_demo.domains.blocksworld.domain import BlocksworldDomain
@@ -57,6 +59,8 @@ def _create_llm(
     api_base: str | None = None,
     tpm: int | None = None,
     rpm: int | None = None,
+    timeout: float | None = None,
+    config_path: str | Path | None = None,
 ) -> BaseLLM:
     """Instantiates and configures LLM backend for planning.
 
@@ -66,6 +70,8 @@ def _create_llm(
         api_base: Optional custom API base URL forwarded when provided.
         tpm: Optional tokens-per-minute rate limit for LiteLLM backend.
         rpm: Optional requests-per-minute rate limit for LiteLLM backend.
+        timeout: Optional request timeout in seconds.
+        config_path: Optional models.json path forwarded to LiteLLM backend.
 
     Returns:
         Configured BaseLLM instance.
@@ -157,23 +163,81 @@ def _create_llm(
             kwargs["base_url"] = api_base
         else:
             kwargs["api_base"] = api_base
+    if timeout is not None:
+        kwargs["timeout"] = timeout
     if normalized in ("litellm", "lite_llm"):
         if tpm is not None:
             kwargs["tokens_per_minute"] = tpm
         if rpm is not None:
             kwargs["requests_per_minute"] = rpm
+        if config_path is not None:
+            kwargs["config_path"] = config_path
     return get_llm(backend, **kwargs)
 
 
-def _create_llm_from_args(args: argparse.Namespace) -> BaseLLM:
-    """Create a configured LLM backend from parsed CLI arguments."""
-    return _create_llm(
-        args.backend,
-        model=getattr(args, "model", None),
-        api_base=getattr(args, "api_base", None),
-        tpm=getattr(args, "tpm", None),
-        rpm=getattr(args, "rpm", None),
-    )
+class _TrackExplicitAction(argparse.Action):
+    """Store CLI argument value and record destination in namespace._explicit_args."""
+
+    def __call__(
+        self,
+        parser: argparse.ArgumentParser,
+        namespace: argparse.Namespace,
+        values: Any,
+        option_string: str | None = None,
+    ) -> None:
+        setattr(namespace, self.dest, values)
+        explicit: set[str] | None = getattr(namespace, "_explicit_args", None)
+        if explicit is None:
+            explicit = set()
+            setattr(namespace, "_explicit_args", explicit)
+        explicit.add(self.dest)
+
+
+def _resolve_execution_llm_config(args: argparse.Namespace) -> dict[str, Any]:
+    """Resolve effective LLM configuration by merging CLI flags with models.json profiles."""
+    config_path = getattr(args, "config", None)
+    model = getattr(args, "model", None)
+    backend = str(getattr(args, "backend", "mock"))
+    api_base = getattr(args, "api_base", None)
+    tpm = getattr(args, "tpm", None)
+    rpm = getattr(args, "rpm", None)
+    timeout: float | None = None
+    explicit_args: set[str] = getattr(args, "_explicit_args", set())
+
+    cfg: ModelsConfig | None = None
+    if config_path is not None or model is not None:
+        cfg = load_models_config(config_path)
+
+    if cfg is not None and model is not None:
+        profile = cfg.resolve_model(model)
+        if profile is not None:
+            if "backend" not in explicit_args:
+                backend = profile.backend
+            model = profile.model or profile.alias
+            if api_base is None:
+                api_base = profile.api_base
+            if tpm is None:
+                tpm = profile.tpm
+            if rpm is None:
+                rpm = profile.rpm
+            timeout = profile.timeout if profile.timeout is not None else cfg.defaults.get("timeout")
+            if "mode" not in explicit_args and profile.mode is not None:
+                args.mode = profile.mode
+            if "iterations" not in explicit_args and profile.iterations is not None:
+                args.iterations = profile.iterations
+
+    resolved: dict[str, Any] = {
+        "backend": backend,
+        "model": model,
+        "api_base": api_base,
+        "tpm": tpm,
+        "rpm": rpm,
+    }
+    if timeout is not None:
+        resolved["timeout"] = float(timeout)
+    if config_path is not None:
+        resolved["config_path"] = config_path
+    return resolved
 
 
 def _add_llm_arguments(subparser: argparse.ArgumentParser) -> None:
@@ -182,12 +246,13 @@ def _add_llm_arguments(subparser: argparse.ArgumentParser) -> None:
         "--backend",
         choices=["mock", "llama-server", "litellm"],
         default="mock",
+        action=_TrackExplicitAction,
         help="LLM backend identifier (choices: mock, llama-server, litellm; default: mock)",
     )
     subparser.add_argument(
         "--model",
         default=None,
-        help="Model identifier for external/local LLM backends (e.g. gpt-4o-mini, anthropic/claude-3-5-sonnet-20241022)",
+        help="Model identifier or models.json alias (e.g. gpt-4o-mini, gemma4-26b)",
     )
     subparser.add_argument(
         "--api-base",
@@ -205,6 +270,11 @@ def _add_llm_arguments(subparser: argparse.ArgumentParser) -> None:
         type=int,
         default=None,
         help="Max requests per minute (RPM) rate limit",
+    )
+    subparser.add_argument(
+        "--config",
+        default=None,
+        help="Path to models.json configuration file",
     )
 
 
@@ -272,6 +342,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--mode",
         choices=["hybrid", "paper"],
         default="hybrid",
+        action=_TrackExplicitAction,
         help="Reasoning mode (choices: hybrid, paper; default: hybrid)",
     )
     _add_llm_arguments(run_parser)
@@ -280,6 +351,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--iterations",
         type=int,
         default=10,
+        action=_TrackExplicitAction,
         help="MCTS search iterations (default: 10)",
     )
     run_parser.add_argument(
@@ -312,6 +384,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--mode",
         choices=["hybrid", "paper"],
         default="hybrid",
+        action=_TrackExplicitAction,
         help="Reasoning mode (choices: hybrid, paper; default: hybrid)",
     )
     _add_llm_arguments(ui_parser)
@@ -320,6 +393,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--iterations",
         type=int,
         default=50,
+        action=_TrackExplicitAction,
         help="Maximum MCTS iterations (default: 50)",
     )
 
@@ -404,6 +478,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="Directory containing saved runs (default: $RAP_RUNS_DIR or ./runs)",
     )
 
+    # 6. `rap models`
+    models_parser = subparsers.add_parser(
+        "models",
+        help="List configured model profiles from models.json",
+    )
+    models_parser.add_argument(
+        "--config",
+        default=None,
+        help="Path to models.json configuration file",
+    )
+
     return parser
 
 
@@ -432,8 +517,11 @@ def cmd_run(args: argparse.Namespace) -> int:
         )
         return 1
 
+    effective_backend = str(args.backend)
     try:
-        llm = _create_llm_from_args(args)
+        resolved_llm_cfg = _resolve_execution_llm_config(args)
+        effective_backend = str(resolved_llm_cfg["backend"])
+        llm = _create_llm(**resolved_llm_cfg)
         domain = BlocksworldDomain(
             initial_state=DEFAULT_INITIAL_STATE,
             goal=DEFAULT_GOAL,
@@ -469,8 +557,8 @@ def cmd_run(args: argparse.Namespace) -> int:
                 root,
                 domain=args.domain,
                 mode=args.mode,
-                backend=args.backend,
-                model=getattr(args, "model", None) or getattr(llm, "model", None),
+                backend=effective_backend,
+                model=resolved_llm_cfg.get("model") or getattr(llm, "model", None),
                 iterations=args.iterations,
                 goal=DEFAULT_GOAL,
                 command="run",
@@ -481,9 +569,10 @@ def cmd_run(args: argparse.Namespace) -> int:
             console.print(f"[dim]Saved run to {saved_path}[/dim]")
 
         return 0
-    except (ConnectionError, ValueError, LLMError) as exc:
+    except (ConnectionError, ValueError, FileNotFoundError, LLMError) as exc:
         err_console.print(f"[bold red]Error:[/bold red] {exc}")
-        _print_backend_error_tip(err_console, str(args.backend))
+        if not isinstance(exc, FileNotFoundError):
+            _print_backend_error_tip(err_console, effective_backend)
         return 1
 
 
@@ -518,8 +607,11 @@ def cmd_ui(args: argparse.Namespace) -> int:
         )
         return 1
 
+    effective_backend = str(args.backend)
     try:
-        llm = _create_llm_from_args(args)
+        resolved_llm_cfg = _resolve_execution_llm_config(args)
+        effective_backend = str(resolved_llm_cfg["backend"])
+        llm = _create_llm(**resolved_llm_cfg)
         domain = BlocksworldDomain(
             initial_state=DEFAULT_INITIAL_STATE,
             goal=DEFAULT_GOAL,
@@ -545,8 +637,8 @@ def cmd_ui(args: argparse.Namespace) -> int:
                 ctrl.root,
                 domain=args.domain,
                 mode=args.mode,
-                backend=args.backend,
-                model=getattr(args, "model", None) or getattr(llm, "model", None),
+                backend=effective_backend,
+                model=resolved_llm_cfg.get("model") or getattr(llm, "model", None),
                 iterations=ctrl.iteration,
                 goal=DEFAULT_GOAL,
                 command="ui",
@@ -575,9 +667,10 @@ def cmd_ui(args: argparse.Namespace) -> int:
     except OSError as exc:
         err_console.print(f"[bold red]Server Bind Error:[/bold red] {exc}")
         return 1
-    except (ConnectionError, ValueError, LLMError) as exc:
+    except (ConnectionError, ValueError, FileNotFoundError, LLMError) as exc:
         err_console.print(f"[bold red]Error:[/bold red] {exc}")
-        _print_backend_error_tip(err_console, str(args.backend))
+        if not isinstance(exc, FileNotFoundError):
+            _print_backend_error_tip(err_console, effective_backend)
         return 1
 
 
@@ -606,9 +699,13 @@ def cmd_compare(args: argparse.Namespace) -> int:
         )
         return 1
 
+    effective_backend = str(args.backend)
     try:
+        resolved_llm_cfg = _resolve_execution_llm_config(args)
+        effective_backend = str(resolved_llm_cfg["backend"])
+
         # 1. Execute Hybrid Mode
-        llm_hybrid = _create_llm_from_args(args)
+        llm_hybrid = _create_llm(**resolved_llm_cfg)
         domain_hybrid = BlocksworldDomain(
             initial_state=DEFAULT_INITIAL_STATE,
             goal=DEFAULT_GOAL,
@@ -628,7 +725,7 @@ def cmd_compare(args: argparse.Namespace) -> int:
         calls_hybrid = getattr(llm_hybrid, "call_count", 0)
 
         # 2. Execute Paper Mode
-        llm_paper = _create_llm_from_args(args)
+        llm_paper = _create_llm(**resolved_llm_cfg)
         domain_paper = BlocksworldDomain(
             initial_state=DEFAULT_INITIAL_STATE,
             goal=DEFAULT_GOAL,
@@ -673,10 +770,10 @@ def cmd_compare(args: argparse.Namespace) -> int:
 
         console.print(table)
         return 0
-    except (ConnectionError, ValueError, LLMError, RuntimeError) as exc:
+    except (ConnectionError, ValueError, FileNotFoundError, LLMError, RuntimeError) as exc:
         err_console.print(f"[bold red]Comparison Error:[/bold red] {exc}")
         if isinstance(exc, (ConnectionError, LLMError)):
-            _print_backend_error_tip(err_console, str(args.backend))
+            _print_backend_error_tip(err_console, effective_backend)
         return 1
 
 
@@ -788,6 +885,50 @@ def cmd_replay(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_models(args: argparse.Namespace) -> int:
+    """Lists configured model profiles from models.json."""
+    console = Console()
+    err_console = Console(stderr=True)
+
+    try:
+        cfg = load_models_config(getattr(args, "config", None))
+    except (FileNotFoundError, ValueError) as exc:
+        err_console.print(f"[bold red]Config Error:[/bold red] {exc}")
+        return 1
+
+    if not cfg.models:
+        console.print("No models configured in models.json.")
+        return 0
+
+    table = Table(
+        title="Configured RAP Model Profiles",
+        show_header=True,
+        header_style="bold magenta",
+    )
+    table.add_column("Alias", style="cyan", no_wrap=True)
+    table.add_column("Backend", style="green", no_wrap=True)
+    table.add_column("Model", style="white", no_wrap=True)
+    table.add_column("TPM", justify="right", no_wrap=True)
+    table.add_column("RPM", justify="right", no_wrap=True)
+    table.add_column("API Base", style="dim")
+    table.add_column("Default", justify="center", no_wrap=True)
+
+    for alias, profile in cfg.models.items():
+        is_default = "Yes" if cfg.default_model == alias else ""
+        table.add_row(
+            alias,
+            profile.backend,
+            profile.model or "-",
+            str(profile.tpm) if profile.tpm is not None else "-",
+            str(profile.rpm) if profile.rpm is not None else "-",
+            profile.api_base or "-",
+            is_default,
+        )
+
+    console.print(table)
+    return 0
+
+
 def main(args: Sequence[str] | None = None) -> int:
     """Main CLI entrypoint for the `rap` command.
 
@@ -830,6 +971,8 @@ def main(args: Sequence[str] | None = None) -> int:
             return cmd_history(parsed_args)
         elif command == "replay":
             return cmd_replay(parsed_args)
+        elif command == "models":
+            return cmd_models(parsed_args)
         else:
             parser.print_help(file=sys.stderr)
             return 1
