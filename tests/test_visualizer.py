@@ -774,3 +774,49 @@ class TestVisualizerWebApp:
 
         assert app is not None
         assert isinstance(app, FastAPI)
+
+    @pytest.mark.asyncio
+    async def test_get_api_meta_endpoint(
+        self, test_controller: SearchController
+    ) -> None:
+        """GET /api/meta returns max_iterations, step_delay_ms, goal, mode, and best_path_ids."""
+        test_controller.goal = ["the red block is on top of the blue block"]
+        test_controller.mode = "hybrid"
+        app_with_meta = create_app(controller=test_controller)
+        transport = ASGITransport(app=app_with_meta)
+
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.get("/api/meta")
+            assert response.status_code == 200
+            data = response.json()
+            assert data["max_iterations"] == 10
+            assert data["step_delay_ms"] == 10
+            assert data["mode"] == "hybrid"
+            assert data["goal"] == ["the red block is on top of the blue block"]
+            assert isinstance(data["best_path_ids"], list)
+            assert len(data["best_path_ids"]) >= 1
+
+    @pytest.mark.asyncio
+    async def test_post_search_config_updates_step_delay(
+        self, async_client: httpx.AsyncClient, test_controller: SearchController
+    ) -> None:
+        """POST /api/search/config updates controller step_delay and validates bounds."""
+        response = await async_client.post("/api/search/config", json={"step_delay_ms": 250})
+        assert response.status_code == 200
+        assert response.json()["step_delay_ms"] == 250
+        assert math.isclose(test_controller.step_delay, 0.25, rel_tol=1e-6)
+
+        invalid_res = await async_client.post("/api/search/config", json={"step_delay_ms": 5})
+        assert invalid_res.status_code == 422
+
+    @pytest.mark.asyncio
+    async def test_step_includes_best_path_ids_and_max_iterations(
+        self, async_client: httpx.AsyncClient
+    ) -> None:
+        """POST /api/search/step includes best_path_ids and max_iterations for UI tracking."""
+        response = await async_client.post("/api/search/step")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["max_iterations"] == 10
+        assert isinstance(data["best_path_ids"], list)
+        assert len(data["best_path_ids"]) >= 1

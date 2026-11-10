@@ -3,76 +3,120 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>RAP Visualizer - Reasoning via Planning</title>
-  <link rel="stylesheet" href="/static/style.css">
+  <title>RAP Visualizer — Reasoning via Planning</title>
+  <link rel="stylesheet" href="/static/style.css?v=3">
 </head>
 <body>
-  <header>
-    <div class="logo-group">
-      <span class="badge">RAP</span>
-      <h1>Reasoning via Planning Visualizer</h1>
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark">RAP</span>
+      <div class="brand-titles">
+        <h1>Reasoning via Planning</h1>
+        <span id="mode-badge" class="mode-badge" hidden>hybrid</span>
+      </div>
     </div>
 
-    <div class="controls-bar">
-      <div class="status-indicator">
+    <div class="toolbar">
+      <div class="status-pill" title="Search execution and stream status">
+        <span id="sse-dot" class="sse-dot connecting" title="Stream connecting"></span>
         <span id="status-dot" class="status-dot idle"></span>
-        <span id="status-text">IDLE</span>
-        <span id="iteration-counter">Iteration: 0</span>
+        <span id="status-text" class="status-label">IDLE</span>
+        <span class="divider"></span>
+        <span id="iteration-counter" class="tabular-num">0 / 50</span>
+        <div class="progress-track" aria-hidden="true">
+          <div id="progress-fill" class="progress-fill" style="width: 0%"></div>
+        </div>
       </div>
 
-      <button id="btn-step" class="btn">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 4 15 12 5 20 5 4"></polygon><line x1="19" y1="5" x2="19" y2="19"></line></svg>
-        Step
-      </button>
+      <div class="btn-group" role="group" aria-label="Search controls">
+        <button id="btn-step" class="btn" title="Advance one MCTS iteration (S)">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 4 15 12 5 20 5 4"></polygon><line x1="19" y1="5" x2="19" y2="19"></line></svg>
+          <span>Step</span>
+          <kbd>S</kbd>
+        </button>
 
-      <button id="btn-play" class="btn btn-primary">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>
-        Play
-      </button>
+        <button id="btn-play" class="btn btn-primary" title="Run continuous search (Space)">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>
+          <span id="btn-play-label">Play</span>
+          <kbd>Space</kbd>
+        </button>
 
-      <button id="btn-pause" class="btn" disabled>
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="6" y="4" width="4" height="16"></rect><rect x="14" y="4" width="4" height="16"></rect></svg>
-        Pause
-      </button>
+        <button id="btn-pause" class="btn" disabled title="Pause search (Space)">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="4" width="4" height="16"></rect><rect x="14" y="4" width="4" height="16"></rect></svg>
+          <span>Pause</span>
+        </button>
 
-      <button id="btn-reset" class="btn btn-danger">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"></path><path d="M3 3v5h5"></path></svg>
-        Reset
-      </button>
-
-      <div class="slider-container">
-        <label for="speed-slider">Speed</label>
-        <input type="range" id="speed-slider" min="10" max="500" value="100">
+        <button id="btn-reset" class="btn btn-ghost-danger" title="Reset tree and state (R)">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"></path><path d="M3 3v5h5"></path></svg>
+          <span>Reset</span>
+          <kbd>R</kbd>
+        </button>
       </div>
 
-      <div class="theme-container">
-        <select id="theme-select" class="theme-select" title="Switch Theme">
-          <option value="tuscan-carbon">🎨 Tuscan & Carbon</option>
-          <option value="cyber-dark">🌌 Cyber Dark</option>
-          <option value="soft-linen-light">☀️ Soft Linen Light</option>
-        </select>
+      <div class="speed-control" title="Delay between automatic iterations">
+        <label for="speed-slider">Delay</label>
+        <input type="range" id="speed-slider" min="10" max="500" step="10" value="50">
+        <span id="speed-value" class="speed-value tabular-num">50 ms</span>
       </div>
+
+      <button id="btn-theme" class="btn btn-icon" type="button" aria-label="Toggle color theme" title="Toggle Light / Dark theme">
+        <svg id="icon-sun" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" hidden><circle cx="12" cy="12" r="4"></circle><path d="M12 2v2"></path><path d="M12 20v2"></path><path d="m4.93 4.93 1.41 1.41"></path><path d="m17.66 17.66 1.41 1.41"></path><path d="M2 12h2"></path><path d="M20 12h2"></path><path d="m6.34 17.66-1.41 1.41"></path><path d="m19.07 4.93-1.41 1.41"></path></svg>
+        <svg id="icon-moon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"></path></svg>
+      </button>
     </div>
   </header>
 
-  <main>
+  <main class="workspace">
     <!-- MCTS Reasoning Tree Panel -->
     <section class="panel tree-panel">
       <div class="panel-header">
-        <span>Reasoning Tree Graph</span>
-        <span style="font-size: 0.75rem;">Nodes: N(Visits), Q(Value), Action</span>
+        <div class="panel-title-group">
+          <span class="panel-title">Reasoning Tree</span>
+          <span id="tree-summary" class="panel-meta tabular-num">1 node · depth 0</span>
+        </div>
+        <div class="tree-legend" aria-label="Tree legend">
+          <span class="legend-item"><span class="legend-swatch selected"></span>Selected</span>
+          <span class="legend-item"><span class="legend-swatch best"></span>Best path</span>
+          <span class="legend-item"><span class="legend-swatch terminal"></span>Terminal</span>
+        </div>
       </div>
-      <div class="tree-container">
-        <svg id="tree-svg" class="tree-svg"></svg>
+
+      <div id="tree-container" class="tree-container">
+        <svg id="tree-svg" class="tree-svg">
+          <g id="tree-viewport"></g>
+        </svg>
+
+        <div class="canvas-controls" aria-label="Tree viewport controls">
+          <button id="btn-zoom-out" class="canvas-btn" type="button" title="Zoom out">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+          </button>
+          <span id="zoom-readout" class="zoom-readout tabular-num">100%</span>
+          <button id="btn-zoom-in" class="canvas-btn" type="button" title="Zoom in">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+          </button>
+          <span class="canvas-sep"></span>
+          <button id="btn-fit-tree" class="canvas-btn canvas-btn-text" type="button" title="Fit tree to view (F)">Fit</button>
+        </div>
+
+        <div id="tree-tooltip" class="tree-tooltip" hidden></div>
       </div>
     </section>
 
     <!-- Blocksworld Tabletop Simulator Panel -->
     <section class="panel tabletop-panel">
       <div class="panel-header">
-        <span>Tabletop Domain State</span>
-        <span style="font-size: 0.75rem;">Blocksworld Simulator</span>
+        <div class="panel-title-group">
+          <span class="panel-title">Domain State</span>
+          <span class="panel-meta">Blocksworld</span>
+        </div>
+        <span id="holding-pill" class="subtle-pill">Hand: empty</span>
       </div>
+
+      <div id="goal-strip" class="goal-strip" hidden>
+        <span class="goal-label">Target</span>
+        <span id="goal-text" class="goal-text"></span>
+      </div>
+
       <div class="tabletop-viewport">
         <div class="gripper-arm">
           <div class="gripper-stem"></div>
@@ -88,31 +132,56 @@
       </div>
     </section>
 
-    <!-- Thought & Inspector Panel -->
+    <!-- Thought & Node Inspector Panel -->
     <section class="panel inspector-panel">
       <div class="panel-header">
-        <span>Thought & Reasoning Inspector</span>
+        <div class="panel-title-group">
+          <span class="panel-title">Node Inspector</span>
+          <div id="trajectory-strip" class="trajectory-strip" aria-label="Best trajectory steps"></div>
+        </div>
         <div class="panel-actions">
-          <button id="btn-follow-best" class="btn btn-sm" style="font-size: 0.7rem; padding: 2px 8px;">Auto-Follow Best Path: ON</button>
+          <div class="segmented" role="tablist" aria-label="Inspector view mode">
+            <button id="tab-overview" class="segmented-btn active" type="button" role="tab" aria-selected="true">Overview</button>
+            <button id="tab-raw" class="segmented-btn" type="button" role="tab" aria-selected="false">Raw JSON</button>
+          </div>
+          <button id="btn-follow-best" class="btn btn-sm active" type="button" aria-pressed="true">Auto-follow: ON</button>
         </div>
       </div>
+
       <div class="inspector-content">
         <div class="inspector-card thought-card">
-          <h4>🧠 Model Reasoning & Thought</h4>
-          <div id="thought-display" class="thought-box">Select any node or click Step/Play to watch the model think in real time...</div>
+          <div class="card-header-row">
+            <h4>Reasoning &amp; Action</h4>
+            <span id="thought-mode-tag" class="subtle-pill">Root</span>
+          </div>
+          <div id="thought-display" class="thought-box">
+            <p class="empty-hint">Select any node or click Step / Play to inspect planning decisions.</p>
+          </div>
         </div>
+
         <div class="inspector-card">
-          <h4>Node Metadata & Metrics</h4>
-          <pre id="node-inspector" class="json-view">Select a node to inspect its MCTS metrics...</pre>
+          <div class="card-header-row">
+            <h4>MCTS Metrics</h4>
+            <span id="node-id-badge" class="mono-muted">—</span>
+          </div>
+          <div id="metrics-overview" class="kpi-grid"></div>
+          <pre id="node-inspector" class="json-view" hidden></pre>
         </div>
+
         <div class="inspector-card">
-          <h4>Domain Physical State</h4>
-          <pre id="state-inspector" class="json-view">State representation...</pre>
+          <div class="card-header-row">
+            <h4>Physical State</h4>
+            <span id="terminal-badge" class="subtle-pill" hidden>Terminal</span>
+          </div>
+          <div id="state-overview" class="state-summary"></div>
+          <pre id="state-inspector" class="json-view" hidden></pre>
         </div>
       </div>
     </section>
   </main>
 
-  <script src="/static/app.js"></script>
+  <div id="toast-container" class="toast-container" aria-live="polite"></div>
+
+  <script src="/static/app.js?v=3"></script>
 </body>
 </html>

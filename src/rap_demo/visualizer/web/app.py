@@ -10,10 +10,26 @@ from typing import Any, AsyncGenerator, Optional
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, Field
 
 from rap_demo.domains.blocksworld.models import BlockState
 from rap_demo.visualizer.serializer import serialize_blocksworld_state, serialize_tree
 from rap_demo.visualizer.web.controller import SearchController
+
+
+class SearchConfigRequest(BaseModel):
+    """Request payload for updating live search playback configuration."""
+
+    step_delay_ms: int = Field(..., ge=10, le=2000, description="Delay between iterations in milliseconds")
+
+
+class _NoCacheStaticFiles(StaticFiles):
+    """StaticFiles handler that prevents stale browser-cached CSS/JS assets."""
+
+    async def get_response(self, path: str, scope: Any) -> Any:
+        response = await super().get_response(path, scope)
+        response.headers["Cache-Control"] = "no-store, max-age=0"
+        return response
 
 
 def create_app(controller: Optional[SearchController] = None) -> FastAPI:
@@ -23,16 +39,21 @@ def create_app(controller: Optional[SearchController] = None) -> FastAPI:
 
     static_dir = Path(__file__).parent / "static"
     if static_dir.exists():
-        server.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
+        server.mount("/static", _NoCacheStaticFiles(directory=str(static_dir)), name="static")
 
     @server.get("/", response_class=HTMLResponse)
     async def get_dashboard() -> HTMLResponse:
         """Returns the real-time visualizer web dashboard HTML."""
+        no_cache_headers = {"Cache-Control": "no-store, max-age=0"}
         index_file = static_dir / "index.html"
         if index_file.exists():
-            return HTMLResponse(content=index_file.read_text(encoding="utf-8"))
+            return HTMLResponse(
+                content=index_file.read_text(encoding="utf-8"),
+                headers=no_cache_headers,
+            )
         return HTMLResponse(
-            content="<html><body><h1>RAP Visualizer</h1><p>Tree reasoning visualizer</p></body></html>"
+            content="<html><body><h1>RAP Visualizer</h1><p>Tree reasoning visualizer</p></body></html>",
+            headers=no_cache_headers,
         )
 
     @server.get("/api/tree")
@@ -50,14 +71,35 @@ def create_app(controller: Optional[SearchController] = None) -> FastAPI:
             return state
         return {"state": str(state)}
 
+    @server.get("/api/meta")
+    async def get_meta() -> dict[str, Any]:
+        """Returns visualizer configuration, goal context, and trajectory metadata."""
+        return {
+            "max_iterations": ctrl.max_iterations,
+            "step_delay_ms": round(ctrl.step_delay * 1000),
+            "mode": ctrl.mode,
+            "goal": ctrl.goal,
+            "status": ctrl.status.value if hasattr(ctrl.status, "value") else str(ctrl.status),
+            "iteration": ctrl.iteration,
+            "best_path_ids": ctrl.get_best_path_ids(),
+        }
+
+    @server.post("/api/search/config")
+    async def post_config(config: SearchConfigRequest) -> dict[str, Any]:
+        """Updates search playback configuration such as step delay."""
+        applied_seconds = ctrl.set_step_delay(config.step_delay_ms / 1000.0)
+        return {"step_delay_ms": round(applied_seconds * 1000)}
+
     @server.post("/api/search/step")
     async def post_step() -> dict[str, Any]:
         """Advances search by one iteration."""
         res = await ctrl.step()
         return {
             "iteration": ctrl.iteration,
+            "max_iterations": ctrl.max_iterations,
             "status": ctrl.status.value if hasattr(ctrl.status, "value") else str(ctrl.status),
             "tree": serialize_tree(ctrl.root),
+            "best_path_ids": ctrl.get_best_path_ids(),
         }
 
     @server.post("/api/search/start")
@@ -93,7 +135,9 @@ def create_app(controller: Optional[SearchController] = None) -> FastAPI:
         res = await ctrl.reset()
         return {
             "iteration": ctrl.iteration,
+            "max_iterations": ctrl.max_iterations,
             "status": ctrl.status.value if hasattr(ctrl.status, "value") else str(ctrl.status),
+            "best_path_ids": ctrl.get_best_path_ids(),
         }
 
     @server.get("/api/stream")
@@ -107,6 +151,8 @@ def create_app(controller: Optional[SearchController] = None) -> FastAPI:
                     "type": "connect",
                     "status": ctrl.status.value if hasattr(ctrl.status, "value") else str(ctrl.status),
                     "iteration": ctrl.iteration,
+                    "max_iterations": ctrl.max_iterations,
+                    "best_path_ids": ctrl.get_best_path_ids(),
                 }
                 yield f"data: {json.dumps(init_data)}\n\n"
 
