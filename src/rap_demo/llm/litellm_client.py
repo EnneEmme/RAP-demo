@@ -120,13 +120,16 @@ def _is_unsupported_param_error(exc: Exception) -> bool:
     return False
 
 
-def _is_rate_limit_error(exc: Exception) -> bool:
-    """Return True when exc is a litellm.RateLimitError."""
+def _is_retryable_error(exc: Exception) -> bool:
+    """Return True when exc is a transient rate-limit or 5xx server error."""
     litellm = sys.modules.get("litellm")
     if litellm is None:
         return False
-    rate_limit_cls = getattr(litellm, "RateLimitError", None)
-    return rate_limit_cls is not None and isinstance(exc, rate_limit_cls)
+    for attr in ("RateLimitError", "InternalServerError", "ServiceUnavailableError"):
+        exc_cls = getattr(litellm, attr, None)
+        if exc_cls is not None and isinstance(exc, exc_cls):
+            return True
+    return False
 
 
 def _map_exception(exc: Exception) -> LLMError:
@@ -326,7 +329,7 @@ class LiteLLMClient(BaseLLM):
             try:
                 response = fn(**kwargs)
             except Exception as exc:
-                if _is_rate_limit_error(exc) and attempt < self.max_retries:
+                if _is_retryable_error(exc) and attempt < self.max_retries:
                     self._sleeper(0.5 * (2**attempt))
                     continue
                 raise

@@ -547,6 +547,34 @@ class TestLiteLLMClientRateLimitingAndRetries:
         assert attempts == 1
         assert fc.sleeps == []
 
+    def test_client_retries_on_transient_internal_server_error(self) -> None:
+        """Retries on transient litellm.InternalServerError / ServiceUnavailableError and succeeds."""
+        litellm = _import_litellm()
+        fc = FakeClock()
+        attempts = 0
+
+        def flaky_server(**_: Any) -> SimpleNamespace:
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise litellm.InternalServerError(
+                    message="Internal error encountered.",
+                    llm_provider="gemini",
+                    model="gemini/gemma-4-26b-a4b-it",
+                )
+            return _make_obj_response("recovered after 500")
+
+        client = LiteLLMClient(
+            model="gemini/gemma-4-26b-a4b-it",
+            max_retries=2,
+            sleeper=fc.sleeper,
+            completion_fn=flaky_server,
+        )
+        assert client.generate("prompt") == "recovered after 500"
+        assert attempts == 2
+        assert len(fc.sleeps) == 1
+
+
 
 # ============================================================================
 # 3. CLI Integration Tests (--tpm / --rpm)
